@@ -1,0 +1,33 @@
+# ETTh1 dataset specific configuration
+# Inherits from default_config.yaml and overrides specific parameters
+
+# Basic config
+model_id: "ETTh1"
+data: "ETTh1"
+data_path: "ETTh1.csv"
+
+# Model parameters for ETTh1 (optimized settings)
+enc_in: 7
+c_out: 7
+d_model: 16
+n_heads: 4
+e_layers: 3
+d_ff: 128
+dropout: 0.3
+fc_dropout: 0.3
+head_dropout: 0
+
+# Training parameters
+train_epochs: 100
+batch_size: 128
+learning_rate: 0.0001
+itr: 1
+
+# Experiment settings for multiple prediction lengths
+experiment:
+  name: "ETTh1_long_forecasting"
+  pred_lens: [96, 192, 336, 720]  # Multiple prediction lengths to test
+  seq_len: 336
+  
+# Logging
+log_dir: "./logs/LongForecasting/"

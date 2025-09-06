@@ -1,0 +1,12 @@
+__pycache__/
+checkpoints/
+logs/
+dataset/
+results/
+outputs/
+
+/PatchTST_supervised/result.txt
+/PatchTST_supervised/test_results/
+
+*.csv
+*.log

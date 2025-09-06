@@ -1,0 +1,22 @@
+defaults:
+  - light_model: DCLT_patchtst_pretrained_cl
+  - model: PatchTST
+
+
+seed: 42
+gpu_id: 0
+device: cuda:0
+devices: 1
+model_name: DCLT_patchtst_pretrained_cl
+dataset:  
+  path: ./dataset/electricity.csv
+  dtw_path: ./DTW_matrix/electricity_dtw_analysis.csv
+  collate_fn: default_collate
+  k: 10 # top-k 邻居数
+  P: 5 # 正样本数
+  N: 20 # 负样本数
+  sigma_method: self_tuning # 计算相似度时的 sigma 方法
+  self_tuning_k: 10 # 计算 sigma_i 时使用的 k（仅在 self_tuning 下使用）
+  use_mutual: True # 是否使用 mutual kNN
+  neg_sampling: hard # 负样本采样方法，'uniform'（均匀采样） 或 'hard'（困难负样本采样，基于 1 - 相似度）
+benchmark: False

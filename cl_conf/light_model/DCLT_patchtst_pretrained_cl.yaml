@@ -1,0 +1,42 @@
+light_name: DCLT_patchtst_pretrained_cl
+
+optimizer:
+  lr: 1e-4
+
+trainer:
+  batch_size: 32
+  max_epochs: 50
+# Early Stopping 配置：当指标在 patience 个 epoch 内没有达到更优改善(超过 min_delta)则提前停止
+early_stop:
+  enable: true          # 关闭则改为 false
+  monitor: train_loss   # 没有验证集时只能用 train_loss；若以后加 val_loss 改成 val_loss
+  mode: min             # 目标是最小化该指标
+  patience: 5           # 容忍多少个 epoch 无提升
+  min_delta: 0.05       # 认为“有改善”所需的最小变化量
+  check_on_train_epoch_end: true  # 只监控 train_loss 时需在 epoch 结束检查
+
+task:
+  name: "pretrained"
+
+chunking:
+  chunk_len: 256 # 和model.context_window绑定，保持一致
+  overlap: 0.5 # stride由overlap计算得出 stride = int(self.chunk_len * (1 - float(self.overlap)))
+  aggregator: 'attn' # 可选参数'mean','attn','transformer','lstm'
+  lstm_hidden: None # 当 aggregator='lstm' 时，LSTM 的 hidden size（单向），实际输出为双向 hidden*2，再通过投影回 emb_dim。典型取值：emb_dim//2 或 64 等
+  transformer_num_layers: 1# # 当 aggregator='transformer' 时，Transformer 的层数。典型取值：2 或 3 等
+  max_chunk_batch: 4
+  # n_chunks: None # 由T和chunk_len计算得出
+
+head:
+  hidden_dim_1: 64
+  out_dim_1: 32 # proj_head输出的维度
+  hidden_dim_2: 1024
+  final_out_dim: 512
+  bias: False
+  dropout: 0.1 # 
+
+loss:
+  temperature: 0.1
+  reduction: mean
+  negative_mode: paired # 可选参数：'paired', 'unpaired'
+  

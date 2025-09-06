@@ -1,0 +1,40 @@
+model: 'PatchTST'
+
+c_in: 1 # 因为返回的数据变成了单变量
+context_window: 256 # chunking的长度, 和light_model.chunking.chunk_len保持一致
+target_window: 0 # 不需要做预测任务，因此是0
+
+patch_len: 64
+stride: 32
+
+d_model: 64 # Transformer的隐藏层维度
+d_ff: 256 # FFN层的中间的
+
+n_layers: 3
+n_heads: 8
+
+attn_dropout: 0.0
+dropout: 0.0
+
+pe: sincos # 'zeros'表示向模型显式注入位置信息，
+learn_pe: false # 位置编码是否可学习
+
+padding_patch: null # 可为: null 或 'end'，控制在切 patch 前是否对序列尾部做额外填充
+
+revin: false # 对每个变量做可逆标准化 (按 batch 内或样本内统计)，缓解不同尺度/漂移。但是鉴于目前是单变量
+affine: true               # RevIN 仿射参数
+subtract_last: false       # RevIN 是否在标准化前减去最后一个值，(去趋势/漂移的一种方式)。
+
+pool: attn                 # 可选: mean / max / attn / cls
+
+emb_dim: 32 # 经过patchtst_backbone的输出维度
+
+# ====== 新增：特征提取 PatchTST_feat_ackbone 相关参数（保持与代码中命名一致） ======
+
+
+proj_hidden: 256           # 投影头隐藏层维度（中间层）（若为空代码里会取 max(d_model, emb_dim)）
+normalize: true            # 是否对最终 embedding 做 L2 归一化
+use_cls_token: false       # 若希望后续支持 CLS token，可改为 true
+
+res_attention: true        # 若底层 encoder 支持残差注意力
+pre_norm: false            # encoder 是否 pre-norm
