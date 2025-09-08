@@ -91,6 +91,17 @@ parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple g
 parser.add_argument('--devices', type=str, default='0,1,2,3', help='device ids of multile gpus')
 parser.add_argument('--test_flop', action='store_true', default=False, help='See utils/tools for usage')
 
+
+# 改进模块的参数放在这里
+
+
+# cl_model_gene表明使用的是第几代cl模型，1表示cl模型是变量级的，2表示cl模型是patch级的，不同模型要对应不同的数据加载方式
+parser.add_argument('--cl_model_gene', type=int, default=1, help='generation of cl model; 1: DCLT_on_var, 2: DCLT_on_path')
+
+# cross-attention模块
+parser.add_argument('--use_cross_attention', type=int, default=1, help='whether to use cross-attention; True 1 False 0')
+parser.add_argument('--add_pos', type=str, default='backbone_x_head', help='whether to add positional encoding in cross-attention, x_emb: between emb and backbone, emb_x_backbone: between emb and backbone, backbone_x_head: between backbone and head')
+
 args = parser.parse_args()
 
 # random seed

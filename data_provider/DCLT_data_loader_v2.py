@@ -228,6 +228,8 @@ class GraphContrastDataset(Dataset):
         neg_data = self.data[:, neg_sample_idx].T.astype(np.float32)  # (N, T)
 
         return torch.from_numpy(anchor), torch.from_numpy(pos_data), torch.from_numpy(neg_data)
+    
+    
 
     @staticmethod # 装饰器，标示为静态方法，不会传入self参数，只处理batch
     def collate_fn(batch):

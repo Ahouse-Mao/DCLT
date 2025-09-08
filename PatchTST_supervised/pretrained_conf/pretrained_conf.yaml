@@ -1,0 +1,5 @@
+model_dir: /home/wms/South/DCLT/checkpoints/
+load_mode: ckpt  # 'ckpt', 'pth', 'pt'
+model_state: fine_tune # 'reason', 'fine_tune', 'feat_extraction'
+use_extra_dataset: DCLT_pred_dataset # 'DCLT_pred_dataset'
+dataset_path: /home/wms/South/DCLT/dataset/electricity.csv

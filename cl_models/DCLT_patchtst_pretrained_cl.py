@@ -190,10 +190,10 @@ class LitModel(L.LightningModule):
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         # 预测阶段：返回 encoder embedding h（用于下游或检索）
-        x = batch if not isinstance(batch, (list, tuple)) else batch[0]
+        x = batch  # (B, 1, T)
         with torch.no_grad():
-            h, z = self.forward(x)
-        return {"h": h.detach().cpu(), "z": z.detach().cpu()}
+            z = self.forward(x)
+        return z
     
     def forward(self, x):
         # x: (Batch, C_in, T_length)
@@ -202,9 +202,7 @@ class LitModel(L.LightningModule):
         h_dict = self.model(x) 
         h = h_dict['anchor'] # (B, C_in, n_chunks, out_dim)
         z = self.proj_head(h) # (B, C_in, final_out_dim)
-        return h, z
-
-
+        return z
 
 # @hydra.main(version_base=None, config_path="cl_conf", config_name="pretrain_cfg")
 # def main(cfg: DictConfig) -> None:

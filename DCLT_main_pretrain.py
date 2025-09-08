@@ -8,6 +8,7 @@ import hydra
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
 from data_provider.DCLT_data_loader_v2 import GraphContrastDataset
+from data_provider.DCLT_pred_data_loader import DCLT_pred_dataset
 from torch.utils.data import DataLoader
 from utils.utils import print_cfg, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint, ModelSummary, EarlyStopping  # callback version
@@ -71,7 +72,7 @@ def _setup_logging(log_dir: str, time_tag: str):
 
 def select_cl_model(cfg: DictConfig, T):
     if cfg.model_name == 'DCLT_patchtst_pretrained_cl':
-        from DCLT_patchtst_pretrained_cl import LitModel
+        from cl_models.DCLT_patchtst_pretrained_cl import LitModel
     else:
         raise ValueError(f"Unknown model: {cfg.model_name}")
 
@@ -219,6 +220,22 @@ def main(cfg: DictConfig) -> None:
 
     logger.info(f"TensorBoard logs dir: {tb_logger.log_dir}")
     logger.info(f"CSV logs dir: {csv_logger.log_dir}")
+
+    # # =============================
+    # # 8. 调整为推理模式
+    # # =============================
+    # dataset_pred = DCLT_pred_dataset(data_path=cfg.dataset.path)
+    # dataloader_pred = DataLoader(
+    #     dataset_pred,
+    #     batch_size=cfg.light_model.trainer.batch_size,
+    #     shuffle=False,
+    # )
+    # model.eval()
+    # model.freeze()
+    # x_list = trainer.predict(model, dataloaders=dataloader_pred)
+    # x = torch.cat(x_list, dim=0)
+    # x = x.squeeze(1)  # (num_vars, final_out_dim)
+    # print(x)
 
 if __name__ == "__main__":
     # 允许直接 python DCLT_main_pretrain.py 运行；Hydra 会接管参数与工作目录
