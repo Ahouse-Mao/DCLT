@@ -54,7 +54,7 @@ class LoadPretrainedCLModel():
         self.use_extra_dataset = yaml_cfg.use_extra_dataset
         self.dataset_path = yaml_cfg.dataset_path
 
-        self.model = self._load_pretrained_cl_model()
+        self.pretrained_model = self._load_pretrained_cl_model()
         self.dataset = self._init_state_of_model()
         if self.use_extra_dataset:
             self.dataset = self._init_dataset()
@@ -117,21 +117,21 @@ class LoadPretrainedCLModel():
         根据配置文件设置模型的状态 
         """
         if self.model_state == 'reason':
-            self.model.eval()
-            self.model.freeze()
+            self.pretrained_model.eval()
+            self.pretrained_model.freeze()
         elif self.model_state == 'fine_tune': # 微调模式
-            self.model.train()  # 整体保持训练模式
+            self.pretrained_model.train()  # 整体保持训练模式
 
             # 冻结早期层
-            for param in self.model.backbone.parameters():
+            for param in self.pretrained_model.model.parameters():
                 param.requires_grad = False
 
             # 解冻后期层
-            for param in self.model.proj_1.parameters():
+            for param in self.pretrained_model.proj_1.parameters():
                 param.requires_grad = True
-            for param in self.model.flatten.parameters():
+            for param in self.pretrained_model.flatten.parameters():
                 param.requires_grad = True
-            for param in self.model.proj_2.parameters():
+            for param in self.pretrained_model.proj_2.parameters():
                 param.requires_grad = True
         elif self.model_state == 'feat_extraction': # 特征提取
             # 特征提取（冻结预训练模型）
@@ -156,13 +156,14 @@ class LoadPretrainedCLModel():
             raise ValueError(f"dataset {self.use_extra_dataset} not supported")
         
     def forward(self, x):
-        return self.model(x)
+        return self.pretrained_model(x)
     
     def forward_use_own_dataset(self,):
         output = []
         for batch in self.dataloader:
-            output.append(self.model(batch))
+            output.append(self.pretrained_model(batch))
         output = torch.cat(output, dim=0)
+        output.squeeze_(1)
         return output
 
 

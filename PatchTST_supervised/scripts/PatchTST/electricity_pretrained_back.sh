@@ -17,6 +17,10 @@ random_seed=2021
 for pred_len in 96 192 336 720
 do
     python -u run_longExp.py \
+      --cl_model_gene 1 \
+      --use_cross_attention True \
+      --add_pos 'backbone_x_head' \
+      --cross_attention_type 'full' \
       --random_seed $random_seed \
       --is_training 1 \
       --root_path $root_path_name \
@@ -42,5 +46,5 @@ do
       --patience 10\
       --lradj 'TST'\
       --pct_start 0.2\
-      --itr 1 --batch_size 32 --learning_rate 0.0001 >logs/LongForecasting/$model_name'_'$model_id_name'_'$seq_len'_'$pred_len.log 
+      --itr 1 --batch_size 40 --learning_rate 0.0001 >logs/LongForecasting/$model_name'_'$model_id_name'_'$seq_len'_'$pred_len.log 
 done

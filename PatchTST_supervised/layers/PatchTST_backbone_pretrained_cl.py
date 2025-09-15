@@ -13,7 +13,7 @@ from layers.PatchTST_layers import *
 from layers.RevIN import RevIN
 
 # 预训练模块的内容
-from pretrained_cl_layers import LoadPretrainedCLModel  # 预训练模型的导入
+from layers.pretrained_cl_layers import LoadPretrainedCLModel  # 预训练模型的导入
 from omegaconf import OmegaConf
 
 # Cell
@@ -50,21 +50,29 @@ class PatchTST_backbone(nn.Module):
         新加入模块
         """
         if use_cross_attention:
-            if add_pos == 'x_emb':
+            if add_pos == 'emb_x_backbone':
                 path =  "/home/wms/South/DCLT/PatchTST_supervised/pretrained_conf/pretrained_conf.yaml"
                 yaml_cfg = OmegaConf.load(path)
-                self.pretrained_model = LoadPretrainedCLModel(yaml_cfg)
-                self.cross_proj = nn.Linear(self.pretrained_model.model.backbone.out_dim, patch_len)  # 用于维度变换,对齐cross_attention的维度
-                self.cross_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)                
+                self.pret_model = LoadPretrainedCLModel(yaml_cfg)
+                self.dim_reduction = nn.Sequential(
+                    nn.Linear(patch_num, 1),
+                    nn.ReLU(),
+                )
+                self.cross_proj = nn.Linear(self.pret_model.pretrained_model.head_args.final_out_dim, patch_len)  # 用于维度变换,对齐cross_attention的维度
+                self.cross_attn = nn.MultiheadAttention(patch_len, n_heads, dropout=dropout, batch_first=True)
+
             elif add_pos == 'backbone_x_head':
                 path =  "/home/wms/South/DCLT/PatchTST_supervised/pretrained_conf/pretrained_conf.yaml"
                 yaml_cfg = OmegaConf.load(path)
-                self.pretrained_model = LoadPretrainedCLModel(yaml_cfg)
-                self.cross_proj = nn.Linear(self.pretrained_model.model.backbone.out_dim, d_model)  # 用于维度变换,对齐cross_attention的维度
+                self.pret_model = LoadPretrainedCLModel(yaml_cfg)
+                self.dim_reduction = nn.Sequential(
+                    nn.Linear(patch_num, 1),
+                    nn.ReLU(),
+                )
+                self.cross_proj = nn.Linear(self.pret_model.pretrained_model.head_args.final_out_dim, d_model)  # 用于维度变换,对齐cross_attention的维度
                 self.cross_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
 
-        
-        # Backbone 
+        # Backbone
         self.backbone = TSTiEncoder(c_in, patch_num=patch_num, patch_len=patch_len, max_seq_len=max_seq_len,
                                 n_layers=n_layers, d_model=d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff,
                                 attn_dropout=attn_dropout, dropout=dropout, act=act, key_padding_mask=key_padding_mask, padding_var=padding_var,
@@ -97,42 +105,51 @@ class PatchTST_backbone(nn.Module):
         z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride)                   # z: [bs x nvars x patch_num x patch_len]
         z = z.permute(0,1,3,2)                                                              # z: [bs x nvars x patch_len x patch_num]
 
-        if self.use_cross_attention and self.add_pos == 'x_emb':
+        if self.use_cross_attention and self.add_pos == 'emb_x_backbone':
             bs, nvars, patch_len, patch_num = z.shape
-            z = z.reshape(bs, nvars, patch_num, patch_len)  # z: [bs x nvars x patch_num x patch_len]
-            Q = z.reshape(bs, nvars * patch_num, patch_len)  # z: [bs x nvars*patch_num x patch_len]
-            out_info = self.pretrained_model.forward_use_own_dataset()  # out_info: [n_vars, pretrained_dim]
+            z_atten = z.reshape(bs * nvars * patch_len, patch_num)  # z: [bs*nvars*patch_len x patch_num]
+            z_atten = self.dim_reduction(z_atten)  # z: [bs*nvars*patch_len x 1]
+            z_atten = z_atten.squeeze(-1) # z: [bs*nvars*patch_len]
+            z_atten = z_atten.reshape(bs, nvars, patch_len)  # z: [bs x nvars x patch_len]
+            Q = z_atten.reshape(bs, nvars, patch_len)  # z: [bs x nvars x patch_len]
+
+            out_info = self.pret_model.forward_use_own_dataset()  # out_info: [n_vars, pretrained_dim]
             out_info = self.cross_proj(out_info)  # out_info: [n_vars, patch_len]
             K_and_V = out_info.unsqueeze(0).expand(bs, -1, -1)  # out_info: [bs, n_vars, patch_len]
 
-            z_attn = self.cross_attn(Q, K_and_V, K_and_V)[0]  # z_attn: [bs, nvars*patch_num, patch_len]
-            z_attn = z_attn.reshape(bs, nvars, patch_num, patch_len)  # z_attn: [bs, nvars, patch_num, patch_len]
+            z_atten = self.cross_attn(Q, K_and_V, K_and_V)[0]  # z_atten: [bs, nvars, patch_len]
+            z_atten = z_atten.reshape(bs, nvars, patch_len)  # z_atten: [bs, nvars, patch_len]
+            z_atten = z_atten.unsqueeze(-1).expand(-1, -1, -1, patch_num)  # z_atten: [bs, nvars, patch_len, patch_num]
 
-            z_fuse = z + z_attn # 残差连接
+            z_fuse = z + z_atten # 残差连接
 
-            z = z_fuse.reshape(bs, nvars, patch_len, patch_num)
+            z = z_fuse # z: [bs, nvars, patch_len, patch_num]
 
         # model
         z = self.backbone(z)                                                                # z: [bs x nvars x d_model x patch_num]
 
         """
-        在模型输出阶段通过cross-attention模块荣古跨变量信息
+        在模型输出阶段通过cross-attention模块融合跨变量信息
         """
         if self.use_cross_attention and self.add_pos == 'backbone_x_head':
             bs, nvars, d_model, patch_num = z.shape
+            
+            z_atten = z.reshape(bs * nvars * d_model, patch_num)  # z: [bs*nvars*d_model x patch_num]
+            z_atten = self.dim_reduction(z_atten)  # z: [bs*nvars*d_model x 1]
+            z_atten = z_atten.squeeze(-1)
+            Q = z_atten.reshape(bs, nvars, d_model)  # z: [bs x nvars x d_model]
 
-            z = z.reshape(bs, patch_num, nvars, d_model)  # z: [bs x patch_num x nvars x d_model]
-            Q = z.reshape(bs, patch_num * nvars, d_model)  # z: [bs x patch_num*nvars x d_model]
-            out_info = self.pretrained_model.forward_use_own_dataset()  # out_info: [n_vars, pretrained_dim]
+            out_info = self.pret_model.forward_use_own_dataset()  # out_info: [n_vars, pretrained_dim]
             out_info = self.cross_proj(out_info)  # out_info: [n_vars, d_model]
             K_and_V = out_info.unsqueeze(0).expand(bs, -1, -1)  # out_info: [bs, n_vars, d_model]
 
-            z_attn = self.cross_attn(Q, K_and_V, K_and_V)[0]  # z_attn: [bs, patch_num*nvars, d_model]
-            z_attn = z_attn.reshape(bs, patch_num, nvars, d_model)  # z_attn: [bs, patch_num, nvars, d_model]
+            z_atten = self.cross_attn(Q, K_and_V, K_and_V)[0]  # z_atten: [bs, nvars, d_model]
+            z_atten = z_atten.reshape(bs, nvars, d_model)  # z_atten: [bs, nvars, d_model]
+            z_atten = z_atten.unsqueeze(-1).expand(-1, -1, -1, patch_num)  # z_atten: [bs, nvars, d_model, patch_num]
 
-            z_fuse = z + z_attn # 残差连接
+            z_fuse = z + z_atten # 残差连接
 
-            z = z_fuse.reshape(bs, nvars, d_model, patch_num)  # z: [bs, nvars, d_model, patch_num]
+            z = z_fuse # z: [bs, nvars, d_model, patch_num]
 
         z = self.head(z)                                                                    # z: [bs x nvars x target_window] 
         

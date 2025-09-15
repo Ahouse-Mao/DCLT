@@ -1,4 +1,4 @@
-__all__ = ['PatchTST']
+__all__ = ['PatchTST_pretrained_cl']
 
 # Cell
 from typing import Callable, Optional

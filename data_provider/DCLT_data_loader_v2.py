@@ -4,6 +4,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import NearestNeighbors
 from torch.utils.data import Dataset, DataLoader
 import torch
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 original_repr = torch.Tensor.__repr__
 def custom_repr(self):
@@ -251,8 +253,8 @@ class GraphContrastDataset(Dataset):
 # - dtw.csv: 第一列/行是变量索引或名称，内容是 DTW 距离矩阵
 if __name__ == "__main__":
     dataset = GraphContrastDataset(
-        data_path="./Dataset/electricity.csv",
-        dtw_matrix="./dtw_results/electricity_dtw_analysis.csv",
+        data_path="./dataset/electricity.csv",
+        dtw_matrix="./DTW_matrix/electricity_dtw_analysis.csv",
         k=10,
         P=5,
         N=20,
@@ -264,12 +266,32 @@ if __name__ == "__main__":
 
     dataloader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=dataset.collate_fn)
 
-    for anchors, pos, neg in dataloader:
-        # anchors: (B, 1, T)
-        # pos: (B, P, T)
-        # neg: (B, N, T)
-        # 送入你的 PatchTST / encoder
-        print("Batch anchors shape:", anchors.shape)
-        print("Dataset data length:", dataset.data_length)
-        print("Batch pos shape:", pos.shape)
-        print("Batch neg shape:", neg.shape)
+    # for anchors, pos, neg in dataloader:
+    #     # anchors: (B, 1, T)
+    #     # pos: (B, P, T)
+    #     # neg: (B, N, T)
+    #     # 送入你的 PatchTST / encoder
+    #     print("Batch anchors shape:", anchors.shape)
+    #     print("Dataset data length:", dataset.data_length)
+    #     print("Batch pos shape:", pos.shape)
+    #     print("Batch neg shape:", neg.shape)
+    #     break  # 只处理一个批次用于演示
+
+    # 绘制相似度矩阵热力图
+    sim_matrix = dataset.get_sim_matrix()
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(sim_matrix, cmap='viridis', cbar=True)
+    plt.title('Similarity Matrix Heatmap (DTW-based)')
+    plt.xlabel('Variable Index')
+    plt.ylabel('Variable Index')
+    
+    # 保存热力图
+    heatmap_path = './similarity_heatmap.png'
+    plt.savefig(heatmap_path, dpi=300, bbox_inches='tight')
+    print(f"热力图已保存到: {heatmap_path}")
+    
+    # 如果在非交互式环境（如脚本）中运行，可能需要关闭图形
+    # plt.close()
+    
+    # 如果在交互式环境（如Jupyter）中运行，可以显示图形
+    plt.show()
