@@ -78,6 +78,11 @@ def select_cl_model(cfg: DictConfig, T):
 
     return LitModel(cfg, T)
 
+def init_path(cfg: DictConfig):
+    root_path = os.getcwd()
+    cfg.dataset.path = os.path.join(root_path, "dataset", f"{cfg.dataset.name}.csv")
+    cfg.dataset.dtw_path = os.path.join(root_path, "DTW_matrix", f"{cfg.dataset.name}.csv")
+    return cfg 
 
 @hydra.main(version_base=None, config_path="cl_conf", config_name="pretrain_cfg")
 def main(cfg: DictConfig) -> None:
@@ -88,13 +93,17 @@ def main(cfg: DictConfig) -> None:
     time_tag = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     project_root = get_original_cwd()
     log_root = getattr(cfg.light_model.trainer, 'log_root', 'logs')
-    log_base = os.path.join(project_root, log_root)
-    _setup_logging(log_base, time_tag)
+    # 日志分区到数据集：logs/<dataset_name>/...
+    dataset_name = getattr(cfg.dataset, 'name', 'default')
+    dataset_log_base = os.path.join(project_root, log_root, dataset_name)
+    _setup_logging(dataset_log_base, time_tag)
 
     logger.info(f"Available GPUs: {torch.cuda.device_count()}")
     logger.info(f"Using GPU ID: {cfg.gpu_id}")
-    print_cfg(cfg, logger)                 # 仍沿用原打印函数（内部可再改 logger）
+    print_cfg(cfg, logger)         # 仍沿用原打印函数（内部可再改 logger）
     seed_everything(cfg.seed)      # 统一随机种子，增强复现性
+
+    cfg = init_path(cfg)
 
     # =============================
     # 1. 构建数据 (仅训练集; 暂不使用验证集)
@@ -133,12 +142,15 @@ def main(cfg: DictConfig) -> None:
     # =============================
     # time_tag / project_root / log_base 已在开头生成，可复用
     ckpt_root = getattr(cfg.light_model.trainer, 'ckpt_root', 'checkpoints')
-    ckpt_dir = os.path.join(project_root, ckpt_root, f"pretrain_{time_tag}")
+    # checkpoints/<dataset_name>/pretrain_<time_tag>
+    dataset_ckpt_base = os.path.join(project_root, ckpt_root, dataset_name)
+    os.makedirs(dataset_ckpt_base, exist_ok=True)
+    ckpt_dir = os.path.join(dataset_ckpt_base, f"pretrain_{time_tag}")
     os.makedirs(ckpt_dir, exist_ok=True)
     # TensorBoardLogger（tb_logger） / CSVLogger（csv_logger）：用来自动收集 训练过程指标，方便 可视化和分析。
     # TensorBoardLogger存储二进制文件，而CSVLogger存储纯文本csv文件，二者可任选其一或同时使用。
-    tb_logger = TensorBoardLogger(save_dir=log_base, name='tb', version=time_tag, default_hp_metric=False)
-    csv_logger = CSVLogger(save_dir=log_base, name='csv', version=time_tag)
+    tb_logger = TensorBoardLogger(save_dir=dataset_log_base, name='tb', version=time_tag, default_hp_metric=False)
+    csv_logger = CSVLogger(save_dir=dataset_log_base, name='csv', version=time_tag)
 
     # =============================
     # 3. 定义回调 (仅保存最优模型; 暂不启用 EarlyStopping)

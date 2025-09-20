@@ -82,7 +82,7 @@ class Model(nn.Module):
                                   pe=pe, learn_pe=learn_pe, fc_dropout=fc_dropout, head_dropout=head_dropout, padding_patch = padding_patch,
                                   pretrain_head=pretrain_head, head_type=head_type, individual=individual, revin=revin, affine=affine,
                                   subtract_last=subtract_last, verbose=verbose, use_cross_attention=use_cross_attention,
-                                  cross_attention_type=cross_attention_type, add_pos=add_pos,**kwargs)
+                                configs=configs, **kwargs)
     
     
     def forward(self, x):           # x: [Batch, Input length, Channel]

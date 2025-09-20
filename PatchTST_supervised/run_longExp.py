@@ -1,9 +1,18 @@
 import argparse
 import os
+import sys
+import logging
 import torch
 from exp.exp_main import Exp_Main
 import random
 import numpy as np
+
+# Configure logging so module-level logger.info messages propagate to stdout
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s][%(levelname)s] %(name)s: %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
 parser = argparse.ArgumentParser(description='Autoformer & Transformer family for Time Series Forecasting')
 

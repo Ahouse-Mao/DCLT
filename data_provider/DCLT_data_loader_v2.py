@@ -4,8 +4,6 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import NearestNeighbors
 from torch.utils.data import Dataset, DataLoader
 import torch
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 original_repr = torch.Tensor.__repr__
 def custom_repr(self):
@@ -32,7 +30,8 @@ class GraphContrastDataset(Dataset):
     - neg_sampling: 'uniform'（均匀采样） 或 'hard'（困难负样本采样，基于 1 - 相似度）
     """
     def __init__(self,
-                 data_name,
+                 data_path,
+                 dtw_matrix=None,  # numpy 数组 或 CSV 文件路径
                  k=10,
                  P=5,
                  N=20,
@@ -42,7 +41,7 @@ class GraphContrastDataset(Dataset):
                  use_mutual=True,
                  neg_sampling='hard',
                  rng_seed=42):
-        self.data_name = data_name
+        self.data_path = data_path
         self.k = k # top-k 邻居数
         self.P = P # 正样本数
         self.N = N # 负样本数
@@ -54,47 +53,18 @@ class GraphContrastDataset(Dataset):
         self.rng = np.random.default_rng(rng_seed)
         self.data_length = 0 # 初始化data_length长度
 
-        self.data_path, self.dtw_path = self.init_args()
-
         # 读取并预处理数据
         self._read_data()
         # 读取 DTW 距离并构建相似度矩阵 / 图结构
-        if isinstance(self.dtw_path, str) or self.dtw_path is None:
-            if self.dtw_path is None:
-                raise ValueError("请提供 dtw_matrix(numpy 数组）或 DTW CSV 文件路径")
-            self._read_dtw_from_csv(self.dtw_path) # 目前仅使用csv读取
+        if isinstance(dtw_matrix, str) or dtw_matrix is None:
+            if dtw_matrix is None:
+                raise ValueError("请提供 dtw_matrix（numpy 数组）或 DTW CSV 文件路径")
+            self._read_dtw_from_csv(dtw_matrix) # 目前仅使用csv读取
+        else:
+            # 如果传入的是 numpy 数组
+            self.dtw = np.array(dtw_matrix, dtype=float)
         self._build_similarity()
         self._build_knn_graph()
-
-    def init_args(self,):
-        if self.data_name == 'ETTh1':
-            self.data_path = './dataset/ETTh1.csv'
-            self.dtw_path = './DTW_matrix/ETTh1.csv'
-        elif self.data_name == 'ETTh2':
-            self.data_path = './dataset/ETTh2.csv'
-            self.dtw_path = './DTW_matrix/ETTh2.csv'
-        elif self.data_name == 'ETTm1':
-            self.data_path = './dataset/ETTm1.csv'
-            self.dtw_path = './DTW_matrix/ETTm1.csv'
-        elif self.data_name == 'ETTm2':
-            self.data_path = './dataset/ETTm2.csv'
-            self.dtw_path = './DTW_matrix/ETTm2.csv'
-        elif self.data_name == 'national_illness':
-            self.data_path = './dataset/national_illness.csv'
-            self.dtw_path = './DTW_matrix/national_illness.csv'
-        elif self.data_name == 'weather':
-            self.data_path = './dataset/weather.csv'
-            self.dtw_path = './DTW_matrix/weather.csv'
-        elif self.data_name == 'electricity':
-            self.data_path = './dataset/electricity.csv'
-            self.dtw_path = './DTW_matrix/electricity.csv'
-        elif self.data_name == 'exchange_rate':
-            self.data_path = './dataset/exchange_rate.csv'
-            self.dtw_path = './DTW_matrix/exchange_rate.csv'
-        else:
-            raise ValueError(f"未知数据集名称 {self.data_name}")
-
-        return self.data_path, self.dtw_path
 
     def _read_data(self):
         df = pd.read_csv(self.data_path)
@@ -281,7 +251,8 @@ class GraphContrastDataset(Dataset):
 # - dtw.csv: 第一列/行是变量索引或名称，内容是 DTW 距离矩阵
 if __name__ == "__main__":
     dataset = GraphContrastDataset(
-        data_name="ETTh1",
+        data_path="./Dataset/electricity.csv",
+        dtw_matrix="./dtw_results/electricity_dtw_analysis.csv",
         k=10,
         P=5,
         N=20,
@@ -293,32 +264,12 @@ if __name__ == "__main__":
 
     dataloader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=dataset.collate_fn)
 
-    # for anchors, pos, neg in dataloader:
-    #     # anchors: (B, 1, T)
-    #     # pos: (B, P, T)
-    #     # neg: (B, N, T)
-    #     # 送入你的 PatchTST / encoder
-    #     print("Batch anchors shape:", anchors.shape)
-    #     print("Dataset data length:", dataset.data_length)
-    #     print("Batch pos shape:", pos.shape)
-    #     print("Batch neg shape:", neg.shape)
-    #     break  # 只处理一个批次用于演示
-
-    # 绘制相似度矩阵热力图
-    sim_matrix = dataset.get_sim_matrix()
-    plt.figure(figsize=(12, 10))
-    sns.heatmap(sim_matrix, cmap='viridis', cbar=True)
-    plt.title('Similarity Matrix Heatmap (DTW-based)')
-    plt.xlabel('Variable Index')
-    plt.ylabel('Variable Index')
-    
-    # 保存热力图
-    heatmap_path = './similarity_heatmap.png'
-    plt.savefig(heatmap_path, dpi=300, bbox_inches='tight')
-    print(f"热力图已保存到: {heatmap_path}")
-    
-    # 如果在非交互式环境（如脚本）中运行，可能需要关闭图形
-    # plt.close()
-    
-    # 如果在交互式环境（如Jupyter）中运行，可以显示图形
-    plt.show()
+    for anchors, pos, neg in dataloader:
+        # anchors: (B, 1, T)
+        # pos: (B, P, T)
+        # neg: (B, N, T)
+        # 送入你的 PatchTST / encoder
+        print("Batch anchors shape:", anchors.shape)
+        print("Dataset data length:", dataset.data_length)
+        print("Batch pos shape:", pos.shape)
+        print("Batch neg shape:", neg.shape)

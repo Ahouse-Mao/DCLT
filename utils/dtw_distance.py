@@ -293,9 +293,9 @@ def get_filenames_without_extension(folder_path):
 if __name__ == "__main__":
     filenames = get_filenames_without_extension("./dataset")
     for filename in filenames:
-        if filename in ["ETTh1", "ETTh2","ETTm1", "ETTm2", "national_illness", "weather", "electricity", "exchange_rate"]:
+        if filename in [ "national_illness", "electricity", "exchange_rate", "traffic"]: # "ETTh1", "ETTh2","ETTm1", "ETTm2", "weather",
             continue  # 跳过这些数据集
-        dtw_calculator = DTW_sim(dataset_name=filename, sample_ratio = 0.1, radius = 1)
+        dtw_calculator = DTW_sim(dataset_name=filename, sample_ratio = 1, radius = 1)
         distance_matrix = dtw_calculator.cal_sim()
         dtw_calculator.print_statistics(distance_matrix)
     

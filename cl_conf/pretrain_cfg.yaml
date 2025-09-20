@@ -9,8 +9,9 @@ device: cuda:0
 devices: 1
 model_name: DCLT_patchtst_pretrained_cl
 dataset:  
-  path: ./dataset/electricity.csv
-  dtw_path: ./DTW_matrix/electricity_dtw_analysis.csv
+  name: traffic
+  path: null
+  dtw_path: null
   collate_fn: default_collate
   k: 10 # top-k 邻居数
   P: 5 # 正样本数

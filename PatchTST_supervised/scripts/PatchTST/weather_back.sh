@@ -9,8 +9,8 @@ seq_len=336
 model_name=PatchTST_pretrained_cl
 
 root_path_name=./dataset/
-data_path_name=electricity.csv
-model_id_name=Electricity
+data_path_name=weather.csv
+model_id_name=weather
 data_name=custom
 
 random_seed=2021
@@ -19,7 +19,7 @@ do
     python -u run_longExp.py \
       --cl_model_gene 1 \
       --use_cross_attention True \
-      --add_pos 'emb_x_backbone' \
+      --add_pos 'backbone_x_head' \
       --cross_attention_type 'full' \
       --random_seed $random_seed \
       --is_training 1 \
@@ -31,7 +31,7 @@ do
       --features M \
       --seq_len $seq_len \
       --pred_len $pred_len \
-      --enc_in 321 \
+      --enc_in 21 \
       --e_layers 3 \
       --n_heads 16 \
       --d_model 128 \
@@ -43,8 +43,6 @@ do
       --stride 8\
       --des 'Exp' \
       --train_epochs 100\
-      --patience 10\
-      --lradj 'TST'\
-      --pct_start 0.2\
-      --itr 1 --batch_size 20 --learning_rate 0.0001 >logs/LongForecasting/$model_name'_'$model_id_name'_'$seq_len'_'$pred_len.log 
+      --patience 20\
+      --itr 1 --batch_size 256 --learning_rate 0.0001 >logs/LongForecasting/$model_name'_'$model_id_name'_'$seq_len'_'$pred_len.log 
 done

@@ -2,6 +2,7 @@ __all__ = ['PatchTST_backbone']
 
 # Cell
 from typing import Callable, Optional
+import logging
 import torch
 from torch import nn
 from torch import Tensor
@@ -15,6 +16,10 @@ from layers.RevIN import RevIN
 # 预训练模块的内容
 from layers.pretrained_cl_layers import LoadPretrainedCLModel  # 预训练模型的导入
 from omegaconf import OmegaConf
+from layers.cl_module_cross_attention import cl_module_cross_attention
+
+# module-level logger
+logger = logging.getLogger(__name__)
 
 # Cell
 class PatchTST_backbone(nn.Module):
@@ -24,14 +29,14 @@ class PatchTST_backbone(nn.Module):
                  padding_var:Optional[int]=None, attn_mask:Optional[Tensor]=None, res_attention:bool=True, pre_norm:bool=False, store_attn:bool=False,
                  pe:str='zeros', learn_pe:bool=True, fc_dropout:float=0., head_dropout = 0, padding_patch = None,
                  pretrain_head:bool=False, head_type = 'flatten', individual = False, revin = True, affine = True, subtract_last = False,
-                 verbose:bool=False, use_cross_attention=False, cross_attention_type='', add_pos='', **kwargs):
+                 verbose:bool=False, configs=None, **kwargs):
         
         super().__init__()
 
         # 新参数
-        self.use_cross_attention = use_cross_attention
-        self.cross_attention_type = cross_attention_type
-        self.add_pos = add_pos
+        self.use_cross_attention = configs.use_cross_attention
+        self.cross_attention_type = configs.cross_attention_type
+        self.add_pos = configs.add_pos
         
         # RevIn
         self.revin = revin
@@ -49,28 +54,8 @@ class PatchTST_backbone(nn.Module):
         """
         新加入模块
         """
-        if use_cross_attention:
-            if add_pos == 'emb_x_backbone':
-                path =  "/home/wms/South/DCLT/PatchTST_supervised/pretrained_conf/pretrained_conf.yaml"
-                yaml_cfg = OmegaConf.load(path)
-                self.pret_model = LoadPretrainedCLModel(yaml_cfg)
-                self.dim_reduction = nn.Sequential(
-                    nn.Linear(patch_num, 1),
-                    nn.ReLU(),
-                )
-                self.cross_proj = nn.Linear(self.pret_model.pretrained_model.head_args.final_out_dim, patch_len)  # 用于维度变换,对齐cross_attention的维度
-                self.cross_attn = nn.MultiheadAttention(patch_len, n_heads, dropout=dropout, batch_first=True)
-
-            elif add_pos == 'backbone_x_head':
-                path =  "/home/wms/South/DCLT/PatchTST_supervised/pretrained_conf/pretrained_conf.yaml"
-                yaml_cfg = OmegaConf.load(path)
-                self.pret_model = LoadPretrainedCLModel(yaml_cfg)
-                self.dim_reduction = nn.Sequential(
-                    nn.Linear(patch_num, 1),
-                    nn.ReLU(),
-                )
-                self.cross_proj = nn.Linear(self.pret_model.pretrained_model.head_args.final_out_dim, d_model)  # 用于维度变换,对齐cross_attention的维度
-                self.cross_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        if self.use_cross_attention:
+            self.cl_module = cl_module_cross_attention(configs, patch_num, patch_len, d_model, n_heads, dropout)
 
         # Backbone
         self.backbone = TSTiEncoder(c_in, patch_num=patch_num, patch_len=patch_len, max_seq_len=max_seq_len,
@@ -103,27 +88,13 @@ class PatchTST_backbone(nn.Module):
         if self.padding_patch == 'end':
             z = self.padding_patch_layer(z)
         z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride)                   # z: [bs x nvars x patch_num x patch_len]
-        z = z.permute(0,1,3,2)                                                              # z: [bs x nvars x patch_len x patch_num]
+        z = z.permute(0,1,3,2) 
+        # logger.info("not into the cross_attention module")                                                            # z: [bs x nvars x patch_len x patch_num]
 
         if self.use_cross_attention and self.add_pos == 'emb_x_backbone':
-            bs, nvars, patch_len, patch_num = z.shape
-            z_atten = z.reshape(bs * nvars * patch_len, patch_num)  # z: [bs*nvars*patch_len x patch_num]
-            z_atten = self.dim_reduction(z_atten)  # z: [bs*nvars*patch_len x 1]
-            z_atten = z_atten.squeeze(-1) # z: [bs*nvars*patch_len]
-            z_atten = z_atten.reshape(bs, nvars, patch_len)  # z: [bs x nvars x patch_len]
-            Q = z_atten.reshape(bs, nvars, patch_len)  # z: [bs x nvars x patch_len]
+            # logger.info("into the cross_attention module")    
+            z = self.cl_module.forward_emb_x_backbone(z)  # z: [bs x nvars x patch_len x patch_num]
 
-            out_info = self.pret_model.forward_use_own_dataset()  # out_info: [n_vars, pretrained_dim]
-            out_info = self.cross_proj(out_info)  # out_info: [n_vars, patch_len]
-            K_and_V = out_info.unsqueeze(0).expand(bs, -1, -1)  # out_info: [bs, n_vars, patch_len]
-
-            z_atten = self.cross_attn(Q, K_and_V, K_and_V)[0]  # z_atten: [bs, nvars, patch_len]
-            z_atten = z_atten.reshape(bs, nvars, patch_len)  # z_atten: [bs, nvars, patch_len]
-            z_atten = z_atten.unsqueeze(-1).expand(-1, -1, -1, patch_num)  # z_atten: [bs, nvars, patch_len, patch_num]
-
-            z_fuse = z + z_atten # 残差连接
-
-            z = z_fuse # z: [bs, nvars, patch_len, patch_num]
 
         # model
         z = self.backbone(z)                                                                # z: [bs x nvars x d_model x patch_num]
@@ -132,24 +103,7 @@ class PatchTST_backbone(nn.Module):
         在模型输出阶段通过cross-attention模块融合跨变量信息
         """
         if self.use_cross_attention and self.add_pos == 'backbone_x_head':
-            bs, nvars, d_model, patch_num = z.shape
-            
-            z_atten = z.reshape(bs * nvars * d_model, patch_num)  # z: [bs*nvars*d_model x patch_num]
-            z_atten = self.dim_reduction(z_atten)  # z: [bs*nvars*d_model x 1]
-            z_atten = z_atten.squeeze(-1)
-            Q = z_atten.reshape(bs, nvars, d_model)  # z: [bs x nvars x d_model]
-
-            out_info = self.pret_model.forward_use_own_dataset()  # out_info: [n_vars, pretrained_dim]
-            out_info = self.cross_proj(out_info)  # out_info: [n_vars, d_model]
-            K_and_V = out_info.unsqueeze(0).expand(bs, -1, -1)  # out_info: [bs, n_vars, d_model]
-
-            z_atten = self.cross_attn(Q, K_and_V, K_and_V)[0]  # z_atten: [bs, nvars, d_model]
-            z_atten = z_atten.reshape(bs, nvars, d_model)  # z_atten: [bs, nvars, d_model]
-            z_atten = z_atten.unsqueeze(-1).expand(-1, -1, -1, patch_num)  # z_atten: [bs, nvars, d_model, patch_num]
-
-            z_fuse = z + z_atten # 残差连接
-
-            z = z_fuse # z: [bs, nvars, d_model, patch_num]
+            z = self.cl_module.forward_backbone_x_head(z)  # z: [bs x nvars x d_model x patch_num]
 
         z = self.head(z)                                                                    # z: [bs x nvars x target_window] 
         

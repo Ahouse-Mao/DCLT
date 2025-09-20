@@ -11,8 +11,8 @@ early_stop:
   enable: true          # 关闭则改为 false
   monitor: train_loss   # 没有验证集时只能用 train_loss；若以后加 val_loss 改成 val_loss
   mode: min             # 目标是最小化该指标
-  patience: 5           # 容忍多少个 epoch 无提升
-  min_delta: 0.05       # 认为“有改善”所需的最小变化量
+  patience: 10           # 容忍多少个 epoch 无提升
+  min_delta: 0.005       # 认为“有改善”所需的最小变化量
   check_on_train_epoch_end: true  # 只监控 train_loss 时需在 epoch 结束检查
 
 task:
