@@ -12,6 +12,7 @@ from data_provider.DCLT_pred_data_loader import DCLT_pred_dataset
 from torch.utils.data import DataLoader
 from utils.utils import print_cfg, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint, ModelSummary, EarlyStopping  # callback version
+from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
 from pytorch_lightning.utilities.model_summary import ModelSummary as ModelSummaryUtil  # utility for manual string summary
 
@@ -167,6 +168,85 @@ def main(cfg: DictConfig) -> None:
     )
     summary_cb = ModelSummary(max_depth=1)
 
+    # ============= 自定义：周期性输出“当前最优” =============
+    class PeriodicBestLogger(Callback):
+        def __init__(self, period: int = 10):
+            super().__init__()
+            self.period = max(1, int(period))
+
+        def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule):
+            epoch = trainer.current_epoch + 1
+            if epoch % self.period != 0 and epoch != 1:
+                return
+
+            # 当前 epoch 指标（若有）
+            current_metrics = {}
+            try:
+                for k, v in trainer.callback_metrics.items():
+                    if hasattr(v, 'item'):
+                        current_metrics[k] = float(v.item())
+                    else:
+                        try:
+                            current_metrics[k] = float(v)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # 寻找 ModelCheckpoint 并读取最佳指标
+            best_score = None
+            best_path = None
+            best_mode = None
+            best_monitor = None
+            for cb in trainer.callbacks:
+                if isinstance(cb, ModelCheckpoint):
+                    monitor = getattr(cb, 'monitor', None)
+                    mode = getattr(cb, 'mode', 'min')
+                    bs = getattr(cb, 'best_model_score', None)
+                    if bs is not None:
+                        try:
+                            bs_val = float(bs.item() if hasattr(bs, 'item') else bs)
+                        except Exception:
+                            continue
+                        if best_score is None:
+                            choose = True
+                        else:
+                            if mode == 'min':
+                                choose = bs_val < best_score
+                            else:
+                                choose = bs_val > best_score
+                        if choose:
+                            best_score = bs_val
+                            best_path = getattr(cb, 'best_model_path', None)
+                            best_mode = mode
+                            best_monitor = monitor
+
+            # 组织输出
+            msg_head = f"[Epoch {epoch}] 周期性汇报："
+            if current_metrics:
+                # 尽量输出与 monitor 一致的指标；若拿不到则挑几个常见项
+                focus_keys = [best_monitor] if best_monitor else []
+                if not focus_keys:
+                    focus_keys = [k for k in ('train_loss', 'loss', 'lr') if k in current_metrics]
+                preview = {k: current_metrics[k] for k in focus_keys if k in current_metrics}
+                if not preview:
+                    # 回退：最多展示前 3 个指标
+                    for k in list(current_metrics.keys())[:3]:
+                        preview[k] = current_metrics[k]
+                logger.info(f"{msg_head}当前指标 {preview}")
+            else:
+                logger.info(f"{msg_head}当前指标获取为空（可能未使用 self.log(on_epoch=True)）")
+
+            if best_score is not None:
+                logger.info(
+                    f"[Epoch {epoch}] 当前最优 {best_monitor}={best_score:.6f} (mode={best_mode}), 路径: {best_path}"
+                )
+            else:
+                logger.info(f"[Epoch {epoch}] 暂无最优指标（可能未配置 monitor 或未产生有效指标）")
+
+    best_log_every = getattr(cfg.light_model.trainer, 'best_log_every', 10)
+    periodic_best_cb = PeriodicBestLogger(period=best_log_every)
+
     # =============================
     # 3.1 EarlyStopping (可选)
     # =============================
@@ -191,7 +271,7 @@ def main(cfg: DictConfig) -> None:
     # 4. 构建 Trainer （仅训练，无验证）
     # =============================
     max_epochs = cfg.light_model.trainer.max_epochs
-    callbacks = [checkpoint_cb, summary_cb]
+    callbacks = [checkpoint_cb, summary_cb, periodic_best_cb]
     if early_stop_cb:
         callbacks.append(early_stop_cb)
 

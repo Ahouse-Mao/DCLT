@@ -1,0 +1,51 @@
+train:
+  device: cuda:0
+
+
+model:
+  seq_len: 336
+  pred_len: 96
+  stride: 8
+  patch_len: 128
+  patch_stride: 16
+  padding_patch: True
+  revin:
+    use_revin: True
+    affine: True
+    subtract_last: False
+  decompose:
+    kernel_size: 9
+  encoder:
+    dropout: 0.1
+    n_heads: 8
+    d_ff: 256
+    out_dim: 256
+  fusion:
+    fusion_type: cross_attn_bi # 'concat' | 'cross_attn_bi' | 'cross_attn_one'
+  spectral_loss:
+    cutoff_ratio: 0.2
+  decoder:
+    weight_mse: 0.5 # 这俩参数需要调整
+    weight_cos: 0.5
+  cl:
+    shift_type: shift_both # 'shift_trend', 'shift_season', 'shift_both'
+  cl_loss:
+    sigma: 1.0 # 软对比学习参数
+    invert: False # 是否要反转软对比学习的计算逻辑, False的逻辑是近大远小, True的逻辑是近小远大
+    min_weight: 1e-6 # 软对比学习中最小权重
+    normalize: False # 是否归一化权重
+    w_enh: 2.0 # 增强样本的权重
+    w_neighbor: 0.8 # 邻近样本的权重
+    gamma: 1.0 # 同变量负样本样本权重指数
+    temp: 0.1 # 对比学习温度系数
+    cl_weight: 1.0 # 对比学习总损失权重
+    spectral_weight: 0.2 # 频域损失权重
+    ortho_weight: 0.2 # 正交损失权重
+    rec_weight: 0.5 # 重构损失权重
+
+
+dataset:
+  name: electricity
+  normalize: True
+  dropna: True
+  n_vars: 321
