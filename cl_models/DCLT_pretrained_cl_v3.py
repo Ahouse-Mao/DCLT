@@ -32,6 +32,13 @@ class LitModel(L.LightningModule):
         # 训练参数
         self.cl_shift_type = cfg.model.cl.shift_type # 'shift_trend', 'shift_season', 'shift_both'
 
+        # loss参数
+        self.loss_chunks = cfg.model.cl_loss.loss_chunks
+        self.cl_weight = cfg.model.cl_loss.cl_weight
+        self.spectral_weight = cfg.model.cl_loss.spectral_weight
+        self.ortho_weight = cfg.model.cl_loss.ortho_weight
+        self.rec_weight = cfg.model.cl_loss.rec_weight
+
         # revin参数
         self.revin = cfg.model.revin.use_revin
         self.n_vars = cfg.dataset.n_vars
@@ -128,8 +135,12 @@ class LitModel(L.LightningModule):
         # reconstruction
         x_rec = self.decoder(x_proj) # (B, C, L)
         # x_rec and x_remain 去计算重建损失rec_loss
-        
-        loss = self.loss_calculator(x_trend, x_season, x_trend_emb, x_season_emb, x_rec, x_remain, x_proj, x_proj_enhance)
+
+        other_loss = self.other_loss_calculator(x_trend, x_season, x_trend_emb, x_season_emb, x_rec, x_remain)
+        x_proj = x_proj.reshape(B, C, N, 1, -1)
+        K = x_proj_enhance.shape[2]
+        x_proj_enhance = x_proj_enhance.reshape(B, C, N, K, -1)
+        loss = self.loss_calculator(x_proj, x_proj_enhance)
 
     def gennerate_cl_samples(self, x_trend_emb, x_season_emb):
         """
@@ -175,8 +186,8 @@ class LitModel(L.LightningModule):
         out = torch.cat([x_shift, x_last_patch], dim=1)
 
         return out
-
-    def loss_calculator(self, x_trend, x_season, x_trend_emb, x_season_emb, x_rec, x_remain, x_proj, x_proj_enhance, var_dtw=None):
+    
+    def other_loss_calculator(self, x_trend, x_season, x_trend_emb, x_season_emb, x_rec, x_remain):
         # spectral loss
         spectral_loss = spectral_loss_from_raw(x_trend, x_season, cutoff_ratio=self.cfg.model.spectral_loss.cutoff_ratio)
         # token orthogonality loss
@@ -189,196 +200,202 @@ class LitModel(L.LightningModule):
 
         rec_loss = self.decoder.rec_loss(x_rec, x_remain)
 
-        # contrastive loss
-        B = x_remain.shape[0]
-        C = self.n_vars
-
-        # x_proj: (B*C, N, 1, d)
-        # x_proj_enhance: (B*C, N, K, d)
-
-        BC, N, K1, d = x_proj.shape
-        K_enh = x_proj_enhance.shape[2]
-
-        # reshape
-        x_proj = x_proj.reshape(B, C, N, K1, d).squeeze(3) # (B, C, N, d)
-        x_proj_enhance = x_proj_enhance.reshape(B, C, N, K_enh, d) # (B, C, N, K, d)
-
-        # hyperparams
-        cl_cfg = getattr(self.cfg.model, "cl", None) 
-        w_enh = float(getattr(cl_cfg, "w_enhance", 2.0)) if cl_cfg is not None else 2.0 # 增强样本正样本权重 (大一些)
-        w_neighbor = float(getattr(cl_cfg, "w_neighbor", 0.8)) if cl_cfg is not None else 0.8 # 左右邻居正样本权重
-        gamma = float(getattr(cl_cfg, "same_var_gamma", 1.0)) if cl_cfg is not None else 1.0 # 同变量负样本权重的指数
-        temp = float(getattr(cl_cfg, "temperature", 0.1)) if cl_cfg is not None else 0.1 # 温度系数
-        # optinal DTW matrix
-        # 这里从外部获取dtw, 有利于后续扩展到计算不同batch的dtw, 在epoch1时完成后续所需的dtw计算
-        # 外源信息的格式应当是(n_vars, n_vars)的矩阵
-        if var_dtw is not None:
-            maxv = var_dtw.max()
-            if maxv > 0:
-                var_dtw_norm = var_dtw / (maxv + 1e-12)
-            else:
-                var_dtw_norm = torch.ones_like(var_dtw) * 0.5
-        else:
-            var_dtw_norm = torch.ones((C, C)) * 0.5
-
-
-        # 准备各类样本
-        Q = B * C * N
-        anchors = x_proj.reshape(Q, d) # (Q, d) anchors
-        enh_flat = x_proj_enhance.reshape(Q, K_enh, d) # (Q, K, d) 增强样本正样本
-
-        # 构造左右邻居 (per (B*C, N, d))
-        x_proj_bc_n = x_proj.reshape(B * C, N, d)   # (BC, N, d)
-        # 左邻居
-        left = torch.zeros_like(x_proj_bc_n) # left: (BC, N, d)
-        left[:, 1:, :] = x_proj_bc_n[:, :-1, :]
-        # 把x_proj_bc_n从index=0开始的值赋给left从index=1开始到index=最后一个的值
-        # 第一个没有左邻居，所以保持为0
-        # 右邻居
-        right = torch.zeros_like(x_proj_bc_n)  # right: (BC, N, d)
-        right[:, :-1, :] = x_proj_bc_n[:, 1:, :] 
-        # 把x_proj_bc_n从index=1开始的值赋给right从index=0开始到index=-1（倒数第二个）的值
-        # 最后一个没有右邻居，所以保持为0
-        left_flat = left.reshape(Q, d) # (Q, d) 把left展平
-        right_flat = right.reshape(Q, d) # (Q, d) 把right展平
-
-        # 同一变量的所有patch集合，排除自身的mask放到后续
-        same_var_all = x_proj_bc_n.unsqueeze(1).repeat(1, N, 1, 1) # (BC, N, N, d)
-        same_var_all_flat = same_var_all.reshape(Q, N, d) # (Q, N, d)
-
-        # 不同变量的所有patch集合，排除自身的mask放到后续
-        x_proj_per_patch = x_proj.permute(0, 2, 1, 3) # x_proj: (B, C, N, d) -> (B, N, C, d)
-        diff_var_all = x_proj_per_patch.unsqueeze(1).repeat(1, C, 1, 1, 1) # (B, C, N, C, d)
-        diff_var_all_flat = diff_var_all.reshape(Q, C, d) # (Q, C, d)
-
-        # 构造 candidate 矩阵
-        # 每个anchor的候选集合[增强样本K, 左邻居, 右邻居, 同变量其他patch(N), 不同变量所有patch(C)]
-
-        M = K_enh + 1 + 1 + N + C
-        cand = torch.zeros(Q, M, d) # (Q, M, d)
-
-        pos = 0
-        cand[:, pos:pos+K_enh, :] = enh_flat # 增强样本正样本 (Q, K, d)
-        pos += K_enh
-        cand[:, pos, :] = left_flat # 左邻居正样本 (Q, 1, d)
-        pos += 1
-        cand[:, pos, :] = right_flat # 右邻居正样本 (Q, 1, d)
-        pos += 1
-        cand[:, pos:pos+N, :] = same_var_all_flat # 同变量负样本 (Q, N, d)
-        pos += N
-        cand[:, pos:pos+C, :] = diff_var_all_flat # 不同变量负样本 (Q, C, d)
-        pos += C
-
-        # 构造权重矩阵
-        weights = torch.zeros(Q, M)# (Q, M)
-        pos = 0
-
-        weights[:, pos:pos+K_enh] = w_enh # 增强样本正样本权重 (Q, K)
-        pos += K_enh
-
-        # 左右邻居权重, 只有在存在邻居的情况下才有权重
-        anchor_idx = torch.arange(Q) # (Q,)
-        n_idx = anchor_idx % N  # (Q,)
-        left_exist = (n_idx > 0).float() # (Q,) 选出有左邻居的，忽略起始点0
-        right_exist = (n_idx < (N - 1)).float() # (Q,) 选出有右邻居的，忽略最后一个点
-        weights[:, pos] = w_neighbor * left_exist  # 左邻居正样本权重 (Q, 1)
-        pos += 1
-        weights[:, pos] = w_neighbor * right_exist  # 右邻居正样本权重 (Q, 1)
-        pos += 1
-
-        # 软对比学习权重(未mask)
-        soft_weight_raw = self.soft_cl_weight.compute(n_idx, N) # (Q, N)
-
-        # 计算mask
-        m_idx = torch.arange(N).unsqueeze(0)  # (1, N) m_idx代表候选集中的同变量patch的index
-        n_idx_repeat = (n_idx.unsqueeze(1)).float()  # (Q, 1)
-        dist = torch.abs(n_idx_repeat - m_idx).float()  # (Q, N) 每个anchor到同变量所有patch的距离, Q=B*C*N, dist也是arrange产生的
-        mask_same = ((m_idx != n_idx_repeat) &
-                     (m_idx != (n_idx_repeat - 1)) &
-                     (m_idx != (n_idx_repeat + 1))).float()  # (Q, N) 排除自身和左右邻居
-        # 应用mask
-        soft_weight = soft_weight_raw * mask_same # (Q, N) 只保留同变量负样本的权重，其他位置为0
-
-        # 写回weights
-        weights[:, pos:pos+N] = soft_weight # 同变量负样本权重 (Q, N)
-        pos += N
-
-        # 不同变量相同位置的负样本权重, 来自var_dtw_norm
-        c_base = torch.arange(C).unsqueeze(1).repeat(1, N).reshape(-1) # (C*N,)
-        c_idx = c_base.repeat(B) # (Q,)=(B*C*N, ) 每个anchor对应的变量index
-        # 用高级索引：取出对应行 -> diff_w shape (Q, C), 因为Q=B*C*N，把C提取出来
-        diff_w = var_dtw_norm[c_idx]
-        diff_w[torch.arange(Q), c_idx] = 0.0 # 排除自身
-        weights[:, pos:pos + C] = diff_w # 写入weights
-        pos += C
-
-        # 构造正样本向量
-        pos_pos_end = K_enh + 1 + 1 # 正样本在候选集中的结束位置
-        pos_weights = weights[:, :pos_pos_end] # (Q, K+1+1)
-        pos_vectors = cand[:, :pos_pos_end, :] # (Q, K+1+1, d)
-        # 每个 anchor 在正样本段上的总权重（标量）。形状 (Q,1)。
-        pos_weight_sum = pos_weights.sum(dim=1, keepdim=True) # (Q, 1)
-        # 布尔掩码，表示哪些 anchor 至少有一个正样本（权重和 > 0）。后续会跳过没有正样本的 anchor（防止除零或产生无意义的 loss）。
-        valid_pos_mask = (pos_weight_sum.squeeze(1) > 0).float() # (Q,) 选出有正样本的anchor
-        
-        # 按权重合成正样本向量
-        positive_key = torch.sum(pos_vectors * pos_weights.unsqueeze(2), dim=1) # (Q, d)
-        positive_key = positive_key / (pos_weight_sum + 1e-12) # (Q, d) 避免除零
-
-        # 构造负样本向量
-        neg_weights = weights[:, pos_pos_end:] # (Q, N+C)
-        neg_vectors = cand[:, pos_pos_end:, :] # (Q, N+C, d)
-
-        # 下面是计算InfoNCE loss
-        # 归一化向量，计算余弦相似度
-        # 首先对所有向量进行L2归一化
-        anc_n = anchors / (anchors.norm(dim=1, keepdim=True) + 1e-12) # (Q, d)
-        pos_n = positive_key / (positive_key.norm(dim=1, keepdim=True) + 1e-12) # (Q, d)
-        neg_n = neg_vectors / (neg_vectors.norm(dim=2, keepdim=True) + 1e-12) # (Q, N+C, d)
-
-        sim_pos = (anc_n * pos_n).sum(dim=1)  # (Q,) 余弦相似度
-        sim_neg = torch.bmm(neg_n, anc_n.unsqueeze(2)).squeeze(2)  # (Q, N+C)
-
-        # 构造logits, 并做temperature缩放
-        logits = torch.cat([sim_pos.unsqueeze(1), sim_neg], dim=1) # (Q, 1+N+C)
-        logits = logits / float(temp) # 温度系数加入，计算出logits
-
-        # 构造权重行并加入logits
-        pos_weight_vec = pos_weight_sum.squeeze(1).clamp(min=1e-12) # (Q,) 避免除零
-        w_row = torch.cat([pos_weight_vec.unsqueeze(1), neg_weights], dim=1) # (Q, 1+N+C)
-
-        # 对0权重的样本做mask
-        zero_mask = (w_row == 0.0) # (Q, 1+N+C)
-        tiny = 1e-12
-        w_row_clamped = w_row.clamp(min=tiny)                  # 将 0 -> tiny 以避免 log(0)
-        logits = logits + torch.log(w_row_clamped)
-        logits = logits.masked_fill(zero_mask, -1e9)
-
-        logp = F.log_softmax(logits, dim=1)
-        loss_per_anchor = -logp[:, 0]    # (Q,)
-
-        if (~valid_pos_mask).any():
-            loss_per_anchor = loss_per_anchor * valid_pos_mask.float()
-
-        valid_count = valid_pos_mask.float().sum()
-        if valid_count.item() == 0:
-            cl_loss = torch.tensor(0.0)
-        else:
-            cl_loss = loss_per_anchor.sum() / valid_count
-
         # 总损失
-        loss = cl_loss * self.cfg.model.cl_loss.weight + \
-               rec_loss * self.cfg.model.rec_loss.weight + \
-               spectral_loss * self.cfg.model.spectral_loss.weight + \
-               ortho_loss * self.cfg.model.ortho_loss.weight
+        loss = rec_loss * self.rec_weight + \
+            spectral_loss * self.spectral_weight + \
+            ortho_loss * self.ortho_weight
+
+        return loss
+
+    def loss_calculator(self, x_proj, x_proj_enhance, var_dtw=None):
+        data = torch.cat([x_proj, x_proj_enhance], dim=3) # (B, C, N, K+1, d)
+        chunks = torch.split(data, split_size_or_sections=self.loss_chunks, dim=0) # loss_chunks在yaml中定义, 用于控制每次读取batch的大小
+        for i, chunk in enumerate(chunks):
+            x_proj = chunk[:, :, :, :1, :] # (B, C, N, 1, d)
+            x_proj_enhance = chunk[:, :, :, 1:, :] # (B, C, N, K, d)
+            # contrastive loss
+            # x_proj: (B, C, N, 1, d)
+            # x_proj_enhance: (B, C, N, K, d)
+
+            B, C, N, K1, d = x_proj.shape
+            K_enh = x_proj_enhance.shape[3]
+
+            # reshape
+            x_proj = x_proj.squeeze(3) # (B, C, N, d)
+
+            # hyperparams
+            cl_cfg = getattr(self.cfg.model, "cl", None) 
+            w_enh = float(getattr(cl_cfg, "w_enhance", 2.0)) if cl_cfg is not None else 2.0 # 增强样本正样本权重 (大一些)
+            w_neighbor = float(getattr(cl_cfg, "w_neighbor", 0.8)) if cl_cfg is not None else 0.8 # 左右邻居正样本权重
+            gamma = float(getattr(cl_cfg, "same_var_gamma", 1.0)) if cl_cfg is not None else 1.0 # 同变量负样本权重的指数
+            temp = float(getattr(cl_cfg, "temperature", 0.1)) if cl_cfg is not None else 0.1 # 温度系数
+            # optinal DTW matrix
+            # 这里从外部获取dtw, 有利于后续扩展到计算不同batch的dtw, 在epoch1时完成后续所需的dtw计算
+            # 外源信息的格式应当是(n_vars, n_vars)的矩阵
+            if var_dtw is not None:
+                maxv = var_dtw.max()
+                if maxv > 0:
+                    var_dtw_norm = var_dtw / (maxv + 1e-12)
+                else:
+                    var_dtw_norm = torch.ones_like(var_dtw) * 0.5
+            else:
+                var_dtw_norm = torch.ones((C, C)) * 0.5
+
+
+            # 准备各类样本
+            Q = B * C * N
+            anchors = x_proj.reshape(Q, d) # (Q, d) anchors
+            enh_flat = x_proj_enhance.reshape(Q, K_enh, d) # (Q, K, d) 增强样本正样本
+
+            # 构造左右邻居 (per (B*C, N, d))
+            x_proj_bc_n = x_proj.reshape(B * C, N, d)   # (BC, N, d)
+            # 左邻居
+            left = torch.zeros_like(x_proj_bc_n) # left: (BC, N, d)
+            left[:, 1:, :] = x_proj_bc_n[:, :-1, :]
+            # 把x_proj_bc_n从index=0开始的值赋给left从index=1开始到index=最后一个的值
+            # 第一个没有左邻居，所以保持为0
+            # 右邻居
+            right = torch.zeros_like(x_proj_bc_n)  # right: (BC, N, d)
+            right[:, :-1, :] = x_proj_bc_n[:, 1:, :] 
+            # 把x_proj_bc_n从index=1开始的值赋给right从index=0开始到index=-1（倒数第二个）的值
+            # 最后一个没有右邻居，所以保持为0
+            left_flat = left.reshape(Q, d) # (Q, d) 把left展平
+            right_flat = right.reshape(Q, d) # (Q, d) 把right展平
+
+            # 同一变量的所有patch集合，排除自身的mask放到后续
+            same_var_all = x_proj_bc_n.unsqueeze(1).repeat(1, N, 1, 1) # (BC, N, N, d)
+            same_var_all_flat = same_var_all.reshape(Q, N, d) # (Q, N, d)
+
+            # 不同变量的所有patch集合，排除自身的mask放到后续
+            x_proj_per_patch = x_proj.permute(0, 2, 1, 3) # x_proj: (B, C, N, d) -> (B, N, C, d)
+            diff_var_all = x_proj_per_patch.unsqueeze(1).repeat(1, C, 1, 1, 1) # (B, C, N, C, d)
+            diff_var_all_flat = diff_var_all.reshape(Q, C, d) # (Q, C, d)
+
+            # 构造 candidate 矩阵
+            # 每个anchor的候选集合[增强样本K, 左邻居, 右邻居, 同变量其他patch(N), 不同变量所有patch(C)]
+
+            M = K_enh + 1 + 1 + N + C
+            cand = torch.zeros(Q, M, d) # (Q, M, d)
+
+            pos = 0
+            cand[:, pos:pos+K_enh, :] = enh_flat # 增强样本正样本 (Q, K, d)
+            pos += K_enh
+            cand[:, pos, :] = left_flat # 左邻居正样本 (Q, 1, d)
+            pos += 1
+            cand[:, pos, :] = right_flat # 右邻居正样本 (Q, 1, d)
+            pos += 1
+            cand[:, pos:pos+N, :] = same_var_all_flat # 同变量负样本 (Q, N, d)
+            pos += N
+            cand[:, pos:pos+C, :] = diff_var_all_flat # 不同变量负样本 (Q, C, d)
+            pos += C
+
+            # 构造权重矩阵
+            weights = torch.zeros(Q, M)# (Q, M)
+            pos = 0
+
+            weights[:, pos:pos+K_enh] = w_enh # 增强样本正样本权重 (Q, K)
+            pos += K_enh
+
+            # 左右邻居权重, 只有在存在邻居的情况下才有权重
+            anchor_idx = torch.arange(Q) # (Q,)
+            n_idx = anchor_idx % N  # (Q,)
+            left_exist = (n_idx > 0).float() # (Q,) 选出有左邻居的，忽略起始点0
+            right_exist = (n_idx < (N - 1)).float() # (Q,) 选出有右邻居的，忽略最后一个点
+            weights[:, pos] = w_neighbor * left_exist  # 左邻居正样本权重 (Q, 1)
+            pos += 1
+            weights[:, pos] = w_neighbor * right_exist  # 右邻居正样本权重 (Q, 1)
+            pos += 1
+
+            # 软对比学习权重(未mask)
+            soft_weight_raw = self.soft_cl_weight.compute(n_idx, N) # (Q, N)
+
+            # 计算mask
+            m_idx = torch.arange(N).unsqueeze(0)  # (1, N) m_idx代表候选集中的同变量patch的index
+            n_idx_repeat = (n_idx.unsqueeze(1)).float()  # (Q, 1)
+            dist = torch.abs(n_idx_repeat - m_idx).float()  # (Q, N) 每个anchor到同变量所有patch的距离, Q=B*C*N, dist也是arrange产生的
+            mask_same = ((m_idx != n_idx_repeat) &
+                        (m_idx != (n_idx_repeat - 1)) &
+                        (m_idx != (n_idx_repeat + 1))).float()  # (Q, N) 排除自身和左右邻居
+            # 应用mask
+            soft_weight = soft_weight_raw * mask_same # (Q, N) 只保留同变量负样本的权重，其他位置为0
+
+            # 写回weights
+            weights[:, pos:pos+N] = soft_weight # 同变量负样本权重 (Q, N)
+            pos += N
+
+            # 不同变量相同位置的负样本权重, 来自var_dtw_norm
+            c_base = torch.arange(C).unsqueeze(1).repeat(1, N).reshape(-1) # (C*N,)
+            c_idx = c_base.repeat(B) # (Q,)=(B*C*N, ) 每个anchor对应的变量index
+            # 用高级索引：取出对应行 -> diff_w shape (Q, C), 因为Q=B*C*N，把C提取出来
+            diff_w = var_dtw_norm[c_idx]
+            diff_w[torch.arange(Q), c_idx] = 0.0 # 排除自身
+            weights[:, pos:pos + C] = diff_w # 写入weights
+            pos += C
+
+            # 构造正样本向量
+            pos_pos_end = K_enh + 1 + 1 # 正样本在候选集中的结束位置
+            pos_weights = weights[:, :pos_pos_end] # (Q, K+1+1)
+            pos_vectors = cand[:, :pos_pos_end, :] # (Q, K+1+1, d)
+            # 每个 anchor 在正样本段上的总权重（标量）。形状 (Q,1)。
+            pos_weight_sum = pos_weights.sum(dim=1, keepdim=True) # (Q, 1)
+            # 布尔掩码，表示哪些 anchor 至少有一个正样本（权重和 > 0）。后续会跳过没有正样本的 anchor（防止除零或产生无意义的 loss）。
+            valid_pos_mask = (pos_weight_sum.squeeze(1) > 0).float() # (Q,) 选出有正样本的anchor
+            
+            # 按权重合成正样本向量
+            positive_key = torch.sum(pos_vectors * pos_weights.unsqueeze(2), dim=1) # (Q, d)
+            positive_key = positive_key / (pos_weight_sum + 1e-12) # (Q, d) 避免除零
+
+            # 构造负样本向量
+            neg_weights = weights[:, pos_pos_end:] # (Q, N+C)
+            neg_vectors = cand[:, pos_pos_end:, :] # (Q, N+C, d)
+
+            # 下面是计算InfoNCE loss
+            # 归一化向量，计算余弦相似度
+            # 首先对所有向量进行L2归一化
+            anc_n = anchors / (anchors.norm(dim=1, keepdim=True) + 1e-12) # (Q, d)
+            pos_n = positive_key / (positive_key.norm(dim=1, keepdim=True) + 1e-12) # (Q, d)
+            neg_n = neg_vectors / (neg_vectors.norm(dim=2, keepdim=True) + 1e-12) # (Q, N+C, d)
+
+            sim_pos = (anc_n * pos_n).sum(dim=1)  # (Q,) 余弦相似度
+            sim_neg = torch.bmm(neg_n, anc_n.unsqueeze(2)).squeeze(2)  # (Q, N+C)
+
+            # 构造logits, 并做temperature缩放
+            logits = torch.cat([sim_pos.unsqueeze(1), sim_neg], dim=1) # (Q, 1+N+C)
+            logits = logits / float(temp) # 温度系数加入，计算出logits
+
+            # 构造权重行并加入logits
+            pos_weight_vec = pos_weight_sum.squeeze(1).clamp(min=1e-12) # (Q,) 避免除零
+            w_row = torch.cat([pos_weight_vec.unsqueeze(1), neg_weights], dim=1) # (Q, 1+N+C)
+
+            # 对0权重的样本做mask
+            zero_mask = (w_row == 0.0) # (Q, 1+N+C)
+            tiny = 1e-12
+            w_row_clamped = w_row.clamp(min=tiny)                  # 将 0 -> tiny 以避免 log(0)
+            logits = logits + torch.log(w_row_clamped)
+            logits = logits.masked_fill(zero_mask, -1e9)
+
+            logp = F.log_softmax(logits, dim=1)
+            loss_per_anchor = -logp[:, 0]    # (Q,)
+
+            if (~valid_pos_mask).any():
+                loss_per_anchor = loss_per_anchor * valid_pos_mask.float()
+
+            valid_count = valid_pos_mask.float().sum()
+            if valid_count.item() == 0:
+                cl_loss = torch.tensor(0.0)
+            else:
+                cl_loss = loss_per_anchor.sum() / valid_count
+
+            # 总损失
+            loss = cl_loss * self.cfg.model.cl_loss.weight
 
         return loss
 
 if __name__ == "__main__":
     cfg = OmegaConf.load('./cl_conf/pretrain_cfg_v3.yaml')
     model = LitModel(cfg)
-    x = torch.rand(16, cfg.dataset.n_vars, cfg.model.seq_len)
-    y = torch.rand(16, cfg.dataset.n_vars, cfg.model.pred_len)
+    x = torch.rand(32, cfg.dataset.n_vars, cfg.model.seq_len)
+    y = torch.rand(32, cfg.dataset.n_vars, cfg.model.pred_len)
     model.train(x, y)
 
 

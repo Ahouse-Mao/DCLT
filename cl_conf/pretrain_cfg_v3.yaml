@@ -7,7 +7,7 @@ model:
   pred_len: 96
   stride: 8
   patch_len: 128
-  patch_stride: 16
+  patch_stride: 8
   padding_patch: True
   revin:
     use_revin: True
@@ -42,6 +42,7 @@ model:
     spectral_weight: 0.2 # 频域损失权重
     ortho_weight: 0.2 # 正交损失权重
     rec_weight: 0.5 # 重构损失权重
+    loss_chunks: 2 # 计算对比学习损失时的batch拆分块数
 
 
 dataset:
