@@ -4,6 +4,7 @@ logs/
 dataset/
 results/
 outputs/
+lightning_logs/
 
 /PatchTST_supervised/result.txt
 /PatchTST_supervised/test_results/
