@@ -23,6 +23,8 @@ from layers.CL_layers_v3 import spectral_loss_from_raw, token_ortho_loss
 
 from loss.infonce_loss import InfoNCE
 
+from data_provider.DCLT_data_loader_v3 import DCLT_data_loader_v3
+from torch.utils.data import DataLoader
 
 class LitModel(L.LightningModule):
     def __init__(self, cfg):
@@ -31,6 +33,7 @@ class LitModel(L.LightningModule):
         self.cfg = cfg
         # 训练参数
         self.cl_shift_type = cfg.model.cl.shift_type # 'shift_trend', 'shift_season', 'shift_both'
+        self.lr = cfg.train.lr
 
         # loss参数
         self.loss_chunks = cfg.model.cl_loss.loss_chunks
@@ -85,16 +88,15 @@ class LitModel(L.LightningModule):
         self.soft_cl_weight = Soft_CL_weight(sigma=cfg.model.cl_loss.sigma, invert=cfg.model.cl_loss.invert,
                                         min_weight=cfg.model.cl_loss.min_weight, normalize=cfg.model.cl_loss.normalize,
                                         )
+    def configure_optimizers(self):
+        """配置优化器(AdamW, 可按需扩展 scheduler)"""
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
+        return optimizer
 
-    # def train(self, batch, batch_idx):
-    #     # norm
-    #     x_remain, y = batch
-    #     x = x_remain
-
-
-    def train(self, x, y):
+    def training_step(self, batch, batch_idx):
         # norm
-        x_remain =x
+        x_remain, y = batch
+        x = x_remain
         
         if self.revin: 
             x = x.permute(0,2,1)
@@ -141,6 +143,8 @@ class LitModel(L.LightningModule):
         K = x_proj_enhance.shape[2]
         x_proj_enhance = x_proj_enhance.reshape(B, C, N, K, -1)
         loss = self.loss_calculator(x_proj, x_proj_enhance)
+
+        return loss + other_loss
 
     def gennerate_cl_samples(self, x_trend_emb, x_season_emb):
         """
@@ -210,6 +214,7 @@ class LitModel(L.LightningModule):
     def loss_calculator(self, x_proj, x_proj_enhance, var_dtw=None):
         data = torch.cat([x_proj, x_proj_enhance], dim=3) # (B, C, N, K+1, d)
         chunks = torch.split(data, split_size_or_sections=self.loss_chunks, dim=0) # loss_chunks在yaml中定义, 用于控制每次读取batch的大小
+        loss = 0.0
         for i, chunk in enumerate(chunks):
             x_proj = chunk[:, :, :, :1, :] # (B, C, N, 1, d)
             x_proj_enhance = chunk[:, :, :, 1:, :] # (B, C, N, K, d)
@@ -242,12 +247,12 @@ class LitModel(L.LightningModule):
                 var_dtw_norm = torch.ones((C, C)) * 0.5
 
 
-            # 准备各类样本
+            # 1.准备各类样本
             Q = B * C * N
             anchors = x_proj.reshape(Q, d) # (Q, d) anchors
             enh_flat = x_proj_enhance.reshape(Q, K_enh, d) # (Q, K, d) 增强样本正样本
 
-            # 构造左右邻居 (per (B*C, N, d))
+            # 1.1构造左右邻居 (per (B*C, N, d))
             x_proj_bc_n = x_proj.reshape(B * C, N, d)   # (BC, N, d)
             # 左邻居
             left = torch.zeros_like(x_proj_bc_n) # left: (BC, N, d)
@@ -262,16 +267,18 @@ class LitModel(L.LightningModule):
             left_flat = left.reshape(Q, d) # (Q, d) 把left展平
             right_flat = right.reshape(Q, d) # (Q, d) 把right展平
 
-            # 同一变量的所有patch集合，排除自身的mask放到后续
+            # 1.2同一变量的所有patch集合，排除自身的mask放到后续
             same_var_all = x_proj_bc_n.unsqueeze(1).repeat(1, N, 1, 1) # (BC, N, N, d)
             same_var_all_flat = same_var_all.reshape(Q, N, d) # (Q, N, d)
 
-            # 不同变量的所有patch集合，排除自身的mask放到后续
+            # 1.3不同变量的所有patch集合，排除自身的mask放到后续
             x_proj_per_patch = x_proj.permute(0, 2, 1, 3) # x_proj: (B, C, N, d) -> (B, N, C, d)
             diff_var_all = x_proj_per_patch.unsqueeze(1).repeat(1, C, 1, 1, 1) # (B, C, N, C, d)
             diff_var_all_flat = diff_var_all.reshape(Q, C, d) # (Q, C, d)
 
-            # 构造 candidate 矩阵
+            del left, right, same_var_all, diff_var_all, x_proj_bc_n, x_proj_per_patch
+
+            # 1.4构造 candidate 矩阵
             # 每个anchor的候选集合[增强样本K, 左邻居, 右邻居, 同变量其他patch(N), 不同变量所有patch(C)]
 
             M = K_enh + 1 + 1 + N + C
@@ -289,14 +296,16 @@ class LitModel(L.LightningModule):
             cand[:, pos:pos+C, :] = diff_var_all_flat # 不同变量负样本 (Q, C, d)
             pos += C
 
-            # 构造权重矩阵
+            del enh_flat, left_flat, right_flat, same_var_all_flat, diff_var_all_flat
+
+            # 2.构造权重矩阵
             weights = torch.zeros(Q, M)# (Q, M)
             pos = 0
 
             weights[:, pos:pos+K_enh] = w_enh # 增强样本正样本权重 (Q, K)
             pos += K_enh
 
-            # 左右邻居权重, 只有在存在邻居的情况下才有权重
+            # 2.1左右邻居权重, 只有在存在邻居的情况下才有权重
             anchor_idx = torch.arange(Q) # (Q,)
             n_idx = anchor_idx % N  # (Q,)
             left_exist = (n_idx > 0).float() # (Q,) 选出有左邻居的，忽略起始点0
@@ -305,8 +314,9 @@ class LitModel(L.LightningModule):
             pos += 1
             weights[:, pos] = w_neighbor * right_exist  # 右邻居正样本权重 (Q, 1)
             pos += 1
+            del anchor_idx, left_exist
 
-            # 软对比学习权重(未mask)
+            # 2.2软对比学习权重(未mask)
             soft_weight_raw = self.soft_cl_weight.compute(n_idx, N) # (Q, N)
 
             # 计算mask
@@ -322,8 +332,9 @@ class LitModel(L.LightningModule):
             # 写回weights
             weights[:, pos:pos+N] = soft_weight # 同变量负样本权重 (Q, N)
             pos += N
+            del dist, m_idx, mask_same, n_idx, n_idx_repeat
 
-            # 不同变量相同位置的负样本权重, 来自var_dtw_norm
+            # 2.3不同变量相同位置的负样本权重, 来自var_dtw_norm
             c_base = torch.arange(C).unsqueeze(1).repeat(1, N).reshape(-1) # (C*N,)
             c_idx = c_base.repeat(B) # (Q,)=(B*C*N, ) 每个anchor对应的变量index
             # 用高级索引：取出对应行 -> diff_w shape (Q, C), 因为Q=B*C*N，把C提取出来
@@ -331,30 +342,34 @@ class LitModel(L.LightningModule):
             diff_w[torch.arange(Q), c_idx] = 0.0 # 排除自身
             weights[:, pos:pos + C] = diff_w # 写入weights
             pos += C
+            del c_base, c_idx, diff_w
 
-            # 构造正样本向量
+            # 3.构造损失函数计算向量
+            # 3.1构造正样本向量
             pos_pos_end = K_enh + 1 + 1 # 正样本在候选集中的结束位置
             pos_weights = weights[:, :pos_pos_end] # (Q, K+1+1)
             pos_vectors = cand[:, :pos_pos_end, :] # (Q, K+1+1, d)
             # 每个 anchor 在正样本段上的总权重（标量）。形状 (Q,1)。
             pos_weight_sum = pos_weights.sum(dim=1, keepdim=True) # (Q, 1)
             # 布尔掩码，表示哪些 anchor 至少有一个正样本（权重和 > 0）。后续会跳过没有正样本的 anchor（防止除零或产生无意义的 loss）。
-            valid_pos_mask = (pos_weight_sum.squeeze(1) > 0).float() # (Q,) 选出有正样本的anchor
+            valid_pos_mask = (pos_weight_sum.squeeze(1) > 0) # (Q,) 选出有正样本的anchor
             
             # 按权重合成正样本向量
             positive_key = torch.sum(pos_vectors * pos_weights.unsqueeze(2), dim=1) # (Q, d)
             positive_key = positive_key / (pos_weight_sum + 1e-12) # (Q, d) 避免除零
 
-            # 构造负样本向量
+            # 3.2构造负样本向量
             neg_weights = weights[:, pos_pos_end:] # (Q, N+C)
             neg_vectors = cand[:, pos_pos_end:, :] # (Q, N+C, d)
+
+            del cand, weights
 
             # 下面是计算InfoNCE loss
             # 归一化向量，计算余弦相似度
             # 首先对所有向量进行L2归一化
             anc_n = anchors / (anchors.norm(dim=1, keepdim=True) + 1e-12) # (Q, d)
-            pos_n = positive_key / (positive_key.norm(dim=1, keepdim=True) + 1e-12) # (Q, d)
-            neg_n = neg_vectors / (neg_vectors.norm(dim=2, keepdim=True) + 1e-12) # (Q, N+C, d)
+            pos_n = (positive_key / (positive_key.norm(dim=1, keepdim=True) + 1e-12)).to(anc_n.device) # (Q, d)
+            neg_n = (neg_vectors / (neg_vectors.norm(dim=2, keepdim=True) + 1e-12)).to(anc_n.device) # (Q, N+C, d)
 
             sim_pos = (anc_n * pos_n).sum(dim=1)  # (Q,) 余弦相似度
             sim_neg = torch.bmm(neg_n, anc_n.unsqueeze(2)).squeeze(2)  # (Q, N+C)
@@ -368,9 +383,9 @@ class LitModel(L.LightningModule):
             w_row = torch.cat([pos_weight_vec.unsqueeze(1), neg_weights], dim=1) # (Q, 1+N+C)
 
             # 对0权重的样本做mask
-            zero_mask = (w_row == 0.0) # (Q, 1+N+C)
+            zero_mask = (w_row == 0.0).to(logits.device) # (Q, 1+N+C)
             tiny = 1e-12
-            w_row_clamped = w_row.clamp(min=tiny)                  # 将 0 -> tiny 以避免 log(0)
+            w_row_clamped = w_row.clamp(min=tiny).to(logits.device)                  # 将 0 -> tiny 以避免 log(0)
             logits = logits + torch.log(w_row_clamped)
             logits = logits.masked_fill(zero_mask, -1e9)
 
@@ -387,16 +402,35 @@ class LitModel(L.LightningModule):
                 cl_loss = loss_per_anchor.sum() / valid_count
 
             # 总损失
-            loss = cl_loss * self.cfg.model.cl_loss.weight
+            loss += cl_loss * self.cl_weight
 
         return loss
 
+# if __name__ == "__main__":
+#     cfg = OmegaConf.load('./cl_conf/pretrain_cfg_v3.yaml')
+#     model = LitModel(cfg)
+#     x = torch.rand(32, cfg.dataset.n_vars, cfg.model.seq_len, device='cuda')
+#     y = torch.rand(32, cfg.dataset.n_vars, cfg.model.pred_len, device='cuda')
+#     model.train(x, y)
+
+
 if __name__ == "__main__":
+
     cfg = OmegaConf.load('./cl_conf/pretrain_cfg_v3.yaml')
+
+    dataset = DCLT_data_loader_v3(
+        cfg=cfg
+    )
+
     model = LitModel(cfg)
-    x = torch.rand(32, cfg.dataset.n_vars, cfg.model.seq_len)
-    y = torch.rand(32, cfg.dataset.n_vars, cfg.model.pred_len)
-    model.train(x, y)
+    print(model)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total params: {total_params:,}, Trainable: {trainable_params:,}")
 
+    train_loader = DataLoader(dataset, batch_size=4, shuffle=True)
 
-        
+    trainer = L.Trainer(max_epochs=cfg.train.epochs, devices="auto", log_every_n_steps=1, accelerator="auto")
+    from pytorch_lightning.utilities.model_summary import summarize
+    print(summarize(model, max_depth=2))
+    trainer.fit(model, train_loader,val_dataloaders= None)
