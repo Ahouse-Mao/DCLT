@@ -258,156 +258,150 @@ class LitModel(L.LightningModule):
         device = x_proj.device  # 统一获取张量所在设备，避免多次 .device 调用
         dtype = x_proj.dtype  # 记录数据类型，构造新张量时保持一致
 
-        # === 步骤概览 ===
-        # 1) 合并 anchor/增强样本形成 data，随后按 loss_chunks 划分子批次。
-        # 2) 在子批次内提取 anchor 向量，聚合增强样本 + 邻居得到正样本表示。
-        # 3) 计算同变量与跨变量负样本的余弦相似度，并应用对应权重/掩码。
-        # 4) 将正负样本的相似度拼成 logits，并加上权重的对数偏置。
-        # 5) 经过 log_softmax 得到 InfoNCE 风格的损失，并按有效 anchor 平均。
-
-        # 1) data: (B, C, N, 1+K, d) —— 将 anchor token 与增强样本沿第 3 维拼接
-        data = torch.cat([x_proj, x_proj_enhance], dim=3)
-        #    chunks: list[Tensor]，每个张量形状仍为 (chunk_B, C, N, 1+K, d)
-        chunks = torch.split(data, split_size_or_sections=self.loss_chunks, dim=0)
         loss = torch.zeros(1, device=device, dtype=dtype)  # 累计 InfoNCE 损失的缓冲张量
 
         w_enh = self.w_enh
         w_neighbor = self.w_neighbor
         temp = self.temp
-        
-        for chunk in chunks:  # chunk: (chunk_B, C, N, 1+K, d)，逐子批处理限制峰值显存
-            # --- STEP 2: 构造 anchor 与正样本 ---
-            # x_anchor: (B, C, N, 1, d)；x_enh: (B, C, N, K, d)
-            x_anchor = chunk[:, :, :, :1, :]
-            x_enh = chunk[:, :, :, 1:, :]
 
-            B, C, N, _, d = x_anchor.shape  # B: chunk 大小, C: 变量数, N: patch 数, d: 投影维
-            K_enh = x_enh.shape[3]  # 增强样本个数(通常为 2)
+        # === 步骤概览 ===
+        # 1) 在子批次内提取 anchor 向量，聚合增强样本 + 邻居得到正样本表示。
+        # 2) 计算同变量与跨变量负样本的余弦相似度，并应用对应权重/掩码。
+        # 3) 将正负样本的相似度拼成 logits，并加上权重的对数偏置。
+        # 4) 经过 log_softmax 得到 InfoNCE 风格的损失，并按有效 anchor 平均。
 
-            # anchors: (Q, d)，其中 Q = B * C * N
-            anchors = x_anchor.squeeze(3).reshape(B * C * N, d)
-            anchors_norm = F.normalize(anchors, dim=1)
+        # --- STEP 1: 构造 anchor 与正样本 ---
+        # x_anchor: (B, C, N, 1, d)；x_enh: (B, C, N, K, d)
+        x_anchor = x_proj
+        x_enh = x_proj_enhance
 
-            pos_sum = torch.zeros_like(anchors)  # (Q, d) 初始化正样本向量和(Q, d), 后面会把增强样本、邻居样本按照权重累加进来，得到所有正样本的中心向量
-            pos_weight_sum = torch.zeros(
-                anchors.shape[0], 1, device=device, dtype=dtype
-            )  # (Q, 1) 用于记录每个 anchor 累积的正样本权重总和，方便最后做加权平均，防止除零（配合 EPS）
+        B, C, N, _, d = x_anchor.shape  # B: chunk 大小, C: 变量数, N: patch 数, d: 投影维
+        K_enh = x_enh.shape[3]  # 增强样本个数(通常为 2)
 
-            if K_enh > 0:
-                # enh_flat: (Q, K, d)
-                enh_flat = x_enh.reshape(B * C * N, K_enh, d)
-                pos_sum = pos_sum + (enh_flat * w_enh).sum(dim=1) # 增强样本加权累加
-                pos_weight_sum = pos_weight_sum + w_enh * torch.ones_like(pos_weight_sum)
+        # anchors: (Q, d)，其中 Q = B * C * N
+        anchors = x_anchor.squeeze(3).reshape(B * C * N, d)
+        anchors_norm = F.normalize(anchors, dim=1)
 
-            # 提前计算BxCxN每个 anchor 在 batch / 变量 / patch 维度上的索引
-            q_idx = torch.arange(anchors.shape[0], device=device)  # (Q,)
-            n_idx = q_idx % N  # 通过取模得到每个anchor属于第几个patch
-            bc_idx = q_idx // N  # 通过整除得到每个anchor属于第几个变量序列
-            b_idx = bc_idx // C  # 得到批次索引, batch index (0..B-1)
-            c_idx = bc_idx % C  # 得到变量索引, variable index (0..C-1)
+        pos_sum = torch.zeros_like(anchors)  # (Q, d) 初始化正样本向量和(Q, d), 后面会把增强样本、邻居样本按照权重累加进来，得到所有正样本的中心向量
+        pos_weight_sum = torch.zeros(
+            anchors.shape[0], 1, device=device, dtype=dtype
+        )  # (Q, 1) 用于记录每个 anchor 累积的正样本权重总和，方便最后做加权平均，防止除零（配合 EPS）
 
-            # valid_left/right: (Q,) 布尔向量，标记 anchor 是否存在左/右邻居 patch
-            valid_left = n_idx > 0
-            if valid_left.any(): # 对于存在左邻居的anchor
-                left_indices = q_idx[valid_left] - 1  # 邻居 patch 的展平索引
-                pos_sum[valid_left] += w_neighbor * anchors[left_indices] # 左邻居样本作为正样本加权乘上去
-                pos_weight_sum[valid_left] += w_neighbor
+        if K_enh > 0:
+            # enh_flat: (Q, K, d)
+            enh_flat = x_enh.reshape(B * C * N, K_enh, d)
+            pos_sum = pos_sum + (enh_flat * w_enh).sum(dim=1) # 增强样本加权累加
+            pos_weight_sum = pos_weight_sum + w_enh * torch.ones_like(pos_weight_sum)
 
-            valid_right = n_idx < (N - 1)
-            if valid_right.any(): # 对于存在右邻居的anchor
-                right_indices = q_idx[valid_right] + 1  # 右邻居 patch 的展平索引
-                pos_sum[valid_right] += w_neighbor * anchors[right_indices] # 右邻居样本作为正样本加权乘上去
-                pos_weight_sum[valid_right] += w_neighbor # 权重累加
+        # 提前计算BxCxN每个 anchor 在 batch / 变量 / patch 维度上的索引
+        q_idx = torch.arange(anchors.shape[0], device=device)  # (Q,)
+        n_idx = q_idx % N  # 通过取模得到每个anchor属于第几个patch
+        bc_idx = q_idx // N  # 通过整除得到每个anchor属于第几个变量序列
+        b_idx = bc_idx // C  # 得到批次索引, batch index (0..B-1)
+        c_idx = bc_idx % C  # 得到变量索引, variable index (0..C-1)
 
-            valid_pos_mask = pos_weight_sum.squeeze(1) > 0  # 标记哪些 anchor 真正拥有正样本
-            positive_key = pos_sum / (pos_weight_sum + EPS)  # 对正样本累积向量做加权平均，得到“正样本中心”，EPS 防止除零。
+        # valid_left/right: (Q,) 布尔向量，标记 anchor 是否存在左/右邻居 patch
+        valid_left = n_idx > 0
+        if valid_left.any(): # 对于存在左邻居的anchor
+            left_indices = q_idx[valid_left] - 1  # 邻居 patch 的展平索引
+            pos_sum[valid_left] += w_neighbor * anchors[left_indices] # 左邻居样本作为正样本加权乘上去
+            pos_weight_sum[valid_left] += w_neighbor
 
-            anc_norm = anchors_norm # 确保anchor和向量中心都是
-            pos_norm = F.normalize(positive_key, dim=1)
-            sim_pos = (anc_norm * pos_norm).sum(dim=1)
+        valid_right = n_idx < (N - 1)
+        if valid_right.any(): # 对于存在右邻居的anchor
+            right_indices = q_idx[valid_right] + 1  # 右邻居 patch 的展平索引
+            pos_sum[valid_right] += w_neighbor * anchors[right_indices] # 右邻居样本作为正样本加权乘上去
+            pos_weight_sum[valid_right] += w_neighbor # 权重累加
 
-            # --- STEP 3: 计算同变量/跨变量负样本及其权重 ---
-            # 3.1计算同变量负样本的权重与掩码
-            # var_dtw_norm: (C, C)
-            if var_dtw is not None:
-                maxv = var_dtw.max()  # 同变量 DTW 矩阵中的最大值，供归一化使用
-                if maxv > 0:
-                    var_dtw_norm = (var_dtw / (maxv + EPS)).to(device=device, dtype=dtype)
-                else:
-                    var_dtw_norm = torch.ones((C, C), device=device, dtype=dtype) * 0.5
+        valid_pos_mask = pos_weight_sum.squeeze(1) > 0  # 标记哪些 anchor 真正拥有正样本
+        positive_key = pos_sum / (pos_weight_sum + EPS)  # 对正样本累积向量做加权平均，得到“正样本中心”，EPS 防止除零。
+
+        anc_norm = anchors_norm # 确保anchor和向量中心都是
+        pos_norm = F.normalize(positive_key, dim=1)
+        sim_pos = (anc_norm * pos_norm).sum(dim=1)
+
+        # --- STEP 2: 计算同变量/跨变量负样本及其权重 ---
+        # 2.1计算同变量负样本的权重与掩码
+        # var_dtw_norm: (C, C)
+        if var_dtw is not None:
+            maxv = var_dtw.max()  # 同变量 DTW 矩阵中的最大值，供归一化使用
+            if maxv > 0:
+                var_dtw_norm = (var_dtw / (maxv + EPS)).to(device=device, dtype=dtype)
             else:
                 var_dtw_norm = torch.ones((C, C), device=device, dtype=dtype) * 0.5
+        else:
+            var_dtw_norm = torch.ones((C, C), device=device, dtype=dtype) * 0.5
 
-            # bc_vectors: (B*C, N, d) —— 每个变量上所有 patch 的表示，方便按变量维度聚合patch
-            bc_vectors = x_anchor.squeeze(3).reshape(B * C, N, d)
-            bc_norm = F.normalize(bc_vectors, dim=2)
-            # same_sim_matrix: (B*C, N, N)，同变量不同 patch 的余弦相似度
-            same_sim_matrix = torch.matmul(bc_norm, bc_norm.transpose(1, 2))
-            # same_sim: (Q, N)，逐 anchor 拿到同变量的所有 patch 余弦相似度
-            same_sim = same_sim_matrix[bc_idx, n_idx]
-            
-            # 计算同变量负样本的权重与掩码
-            soft_weight_raw = self.soft_cl_weight.compute(n_idx, N).to(
-                device=device, dtype=dtype
-            )
-            mask_same = torch.ones_like(soft_weight_raw, dtype=torch.bool, device=device)
-            mask_same[torch.arange(anchors.shape[0], device=device), n_idx] = False
-            if N > 1:
-                # 为了避免把anchor的左右邻居当作负样本，这里将邻近位置的掩码关闭
-                # （这些邻居已经在正样本聚合时参与过，不需重复进入 InfoNCE 分母）。
-                left_target_idx = n_idx - 1
-                right_target_idx = n_idx + 1
-                mask_same[valid_left, left_target_idx[valid_left]] = False
-                mask_same[valid_right, right_target_idx[valid_right]] = False
+        # bc_vectors: (B*C, N, d) —— 每个变量上所有 patch 的表示，方便按变量维度聚合patch
+        bc_vectors = x_anchor.squeeze(3).reshape(B * C, N, d)
+        bc_norm = F.normalize(bc_vectors, dim=2)
+        # same_sim_matrix: (B*C, N, N)，同变量不同 patch 的余弦相似度
+        same_sim_matrix = torch.matmul(bc_norm, bc_norm.transpose(1, 2))
+        # same_sim: (Q, N)，逐 anchor 拿到同变量的所有 patch 余弦相似度
+        same_sim = same_sim_matrix[bc_idx, n_idx]
+        
+        # 计算同变量负样本的权重与掩码
+        soft_weight_raw = self.soft_cl_weight.compute(n_idx, N).to(
+            device=device, dtype=dtype
+        )
+        mask_same = torch.ones_like(soft_weight_raw, dtype=torch.bool, device=device)
+        mask_same[torch.arange(anchors.shape[0], device=device), n_idx] = False
+        if N > 1:
+            # 为了避免把anchor的左右邻居当作负样本，这里将邻近位置的掩码关闭
+            # （这些邻居已经在正样本聚合时参与过，不需重复进入 InfoNCE 分母）。
+            left_target_idx = n_idx - 1
+            right_target_idx = n_idx + 1
+            mask_same[valid_left, left_target_idx[valid_left]] = False
+            mask_same[valid_right, right_target_idx[valid_right]] = False
 
-            soft_weight = soft_weight_raw * mask_same.float()
-            same_logits = same_sim / temp  # (Q, N)
-            same_logits = same_logits.masked_fill(~mask_same, NEG_INF)
+        soft_weight = soft_weight_raw * mask_same.float()
+        same_logits = same_sim / temp  # (Q, N)
+        same_logits = same_logits.masked_fill(~mask_same, NEG_INF)
 
-            # 3.2计算跨变量负样本的权重与掩码
-            patch_vectors = (
-                x_anchor.squeeze(3).permute(0, 2, 1, 3).contiguous().reshape(B * N, C, d)
-            )
-            # patch_vectors: (B*N, C, d)，把同一 patch 下所有变量的表示整理在一起，方便后续构造跨变量相似度
-            patch_norm = F.normalize(patch_vectors, dim=2)
-            # diff_sim_matrix: (B*N, C, C)，同一 patch 在不同变量之间的余弦相似度
-            diff_sim_matrix = torch.matmul(patch_norm, patch_norm.transpose(1, 2))
-            patch_row_idx = b_idx * N + n_idx  # 把展平后的 anchor 索引映射到 “batch*patch” 维，锁定当前 anchor 所在的 patch。
-            diff_sim = diff_sim_matrix[patch_row_idx, c_idx]  # (Q, C) # 
-            diff_logits = diff_sim / temp
+        # 2.2计算跨变量负样本的权重与掩码
+        patch_vectors = (
+            x_anchor.squeeze(3).permute(0, 2, 1, 3).contiguous().reshape(B * N, C, d)
+        )
+        # patch_vectors: (B*N, C, d)，把同一 patch 下所有变量的表示整理在一起，方便后续构造跨变量相似度
+        patch_norm = F.normalize(patch_vectors, dim=2)
+        # diff_sim_matrix: (B*N, C, C)，同一 patch 在不同变量之间的余弦相似度
+        diff_sim_matrix = torch.matmul(patch_norm, patch_norm.transpose(1, 2))
+        patch_row_idx = b_idx * N + n_idx  # 把展平后的 anchor 索引映射到 “batch*patch” 维，锁定当前 anchor 所在的 patch。
+        diff_sim = diff_sim_matrix[patch_row_idx, c_idx]  # (Q, C) # 
+        diff_logits = diff_sim / temp
 
-            diff_w = var_dtw_norm.index_select(0, c_idx)  # 用归一化后的 DTW 权重来衡量变量间的关联，形状 (Q, C)。
-            diff_w[torch.arange(anchors.shape[0], device=device), c_idx] = 0.0  # 自身变量不参与, 设置为0
-            diff_logits = diff_logits.masked_fill(diff_w <= 0, NEG_INF)
+        diff_w = var_dtw_norm.index_select(0, c_idx)  # 用归一化后的 DTW 权重来衡量变量间的关联，形状 (Q, C)。
+        diff_w[torch.arange(anchors.shape[0], device=device), c_idx] = 0.0  # 自身变量不参与, 设置为0
+        diff_logits = diff_logits.masked_fill(diff_w <= 0, NEG_INF)
 
-            # --- STEP 4: 拼接正负 logits 并加入权重的对数偏置 ---
-            pos_weight_vec = pos_weight_sum.squeeze(1).clamp(min=EPS)  # (Q,)
-            pos_logits = sim_pos.unsqueeze(1) / temp  # (Q, 1) # 计算正样本 logits
+        # --- STEP 3: 拼接正负 logits 并加入权重的对数偏置 ---
+        pos_weight_vec = pos_weight_sum.squeeze(1).clamp(min=EPS)  # (Q,)
+        pos_logits = sim_pos.unsqueeze(1) / temp  # (Q, 1) # 计算正样本 logits
 
-            # logits_all / weights_all: (Q, 1 + N + C)
-            logits_all = torch.cat([pos_logits, same_logits, diff_logits], dim=1)
-            weights_all = torch.cat(
-                [pos_weight_vec.unsqueeze(1), soft_weight, diff_w], dim=1
-            )
+        # logits_all / weights_all: (Q, 1 + N + C)
+        logits_all = torch.cat([pos_logits, same_logits, diff_logits], dim=1)
+        weights_all = torch.cat(
+            [pos_weight_vec.unsqueeze(1), soft_weight, diff_w], dim=1
+        )
 
-            zero_mask = weights_all <= 0
-            logits_all = logits_all + torch.log(weights_all.clamp(min=EPS)) # 把权重转成对数并加到 logits 上，相当于把权重视作 softmax 前的偏置
-            logits_all = logits_all.masked_fill(zero_mask, NEG_INF)
+        zero_mask = weights_all <= 0
+        logits_all = logits_all + torch.log(weights_all.clamp(min=EPS)) # 把权重转成对数并加到 logits 上，相当于把权重视作 softmax 前的偏置
+        logits_all = logits_all.masked_fill(zero_mask, NEG_INF)
 
-            # --- STEP 5: InfoNCE 损失并按有效 anchor 做均值 ---
-            logp = F.log_softmax(logits_all, dim=1) # 对每个 anchor 的整行 logits 做 log-softmax，得到对数概率
-            loss_per_anchor = -logp[:, 0]  # 取每行第 0 列（正样本）的对数概率，取负号得到 InfoNCE 的正项损失。
-            loss_per_anchor = loss_per_anchor * valid_pos_mask.float() # 对没有正样本的 anchor（比如权重总和为 0）将损失置为 0，避免干扰平均。
+        # --- STEP 4: InfoNCE 损失并按有效 anchor 做均值 ---
+        logp = F.log_softmax(logits_all, dim=1) # 对每个 anchor 的整行 logits 做 log-softmax，得到对数概率
+        loss_per_anchor = -logp[:, 0]  # 取每行第 0 列（正样本）的对数概率，取负号得到 InfoNCE 的正项损失。
+        loss_per_anchor = loss_per_anchor * valid_pos_mask.float() # 对没有正样本的 anchor（比如权重总和为 0）将损失置为 0，避免干扰平均。
 
-            valid_count = valid_pos_mask.float().sum()  # 有效 anchor 的数量
-            if valid_count.item() > 0:
-                cl_loss = loss_per_anchor.sum() / valid_count
-            else:
-                cl_loss = torch.zeros(1, device=device, dtype=dtype)
+        valid_count = valid_pos_mask.float().sum()  # 有效 anchor 的数量
+        if valid_count.item() > 0:
+            cl_loss = loss_per_anchor.sum() / valid_count
+        else:
+            cl_loss = torch.zeros(1, device=device, dtype=dtype)
 
-            loss = loss + cl_loss * self.cl_weight
+        loss = cl_loss * self.cl_weight
 
-        return loss.squeeze(0)
+        return loss
 
 
 if __name__ == "__main__":
