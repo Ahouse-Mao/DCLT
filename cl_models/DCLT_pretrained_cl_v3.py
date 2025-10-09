@@ -428,7 +428,7 @@ if __name__ == "__main__":
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total params: {total_params:,}, Trainable: {trainable_params:,}")
 
-    train_loader = DataLoader(dataset, batch_size=4, shuffle=True)
+    train_loader = DataLoader(dataset, batch_size=2, shuffle=True)
 
     trainer = L.Trainer(max_epochs=cfg.train.epochs, devices="auto", log_every_n_steps=1, accelerator="auto")
     from pytorch_lightning.utilities.model_summary import summarize

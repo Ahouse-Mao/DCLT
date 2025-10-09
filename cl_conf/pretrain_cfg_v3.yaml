@@ -2,6 +2,7 @@ train:
   device: cuda:0
   epochs: 10
   lr: 1e-5
+  batch_size: 8
 
 
 model:
@@ -39,12 +40,12 @@ model:
     w_enh: 2.0 # 增强样本的权重
     w_neighbor: 0.8 # 邻近样本的权重
     gamma: 1.0 # 同变量负样本样本权重指数
-    temp: 0.1 # 对比学习温度系数
+    temperature: 0.1 # 对比学习温度系数
     cl_weight: 1.0 # 对比学习总损失权重
     spectral_weight: 0.2 # 频域损失权重
     ortho_weight: 0.2 # 正交损失权重
     rec_weight: 0.5 # 重构损失权重
-    loss_chunks: 1 # 计算对比学习损失时的batch拆分块数
+    loss_chunks: 8 # 计算对比学习损失时的batch拆分块数
 
 
 dataset:

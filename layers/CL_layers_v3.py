@@ -321,30 +321,33 @@ class Soft_CL_weight():
             已经把 anchor 自身与左右邻居位置置 0(mask)。
         """
         Q = n_idx.shape[0]
+        device = n_idx.device  # 保持与输入索引一致的设备
 
         # m_idx: (1, N) -> [0,1,...,N-1]
-        m_idx = torch.arange(N).unsqueeze(0).float()  # (1, N)
+        m_idx = torch.arange(N, device=device, dtype=n_idx.dtype).unsqueeze(0)
 
         # n_idx_repeat: (Q, 1)
-        n_idx_repeat = n_idx.unsqueeze(1).float()                   # (Q, 1)
+        n_idx_repeat = n_idx.unsqueeze(1)  # (Q, 1)
 
         # dist: (Q, N) 绝对距离矩阵
-        dist = torch.abs(n_idx_repeat - m_idx)                      # (Q, N)
+        dist = torch.abs(n_idx_repeat - m_idx)  # (Q, N)
 
         # 用稳定形式计算 timelag_sigmoid：2 * sigmoid(-dist * sigma)
         # 这里不用直接 exp(clamp(...))，使用 sigmoid 更稳定
-        same_w = 2.0 * torch.sigmoid(- dist * self.sigma)  # (Q, N)
+        same_w = 2.0 * torch.sigmoid(-dist * self.sigma)  # (Q, N)
 
         # 把非常小的权重置 0（稀疏化）
         if self.min_weight is not None and self.min_weight > 0:
-            same_w = torch.where(same_w < self.min_weight, torch.zeros_like(same_w), same_w)
+            same_w = torch.where(
+                same_w < self.min_weight, torch.zeros_like(same_w), same_w
+            )
 
-         # 可选：对同变量段按行归一化（每个 anchor 的行和为 1）
+        # 可选：对同变量段按行归一化（每个 anchor 的行和为 1）
         if self.normalize:
             row_sum = same_w.sum(dim=1, keepdim=True)  # (Q, 1)
             same_w = same_w / (row_sum + 1e-12)
 
-        return same_w.to(self.dtype) 
+        return same_w.to(device=device, dtype=self.dtype)
 
 def spectral_loss_from_raw(trend_raw, season_raw, cutoff_ratio=0.2):
     """
