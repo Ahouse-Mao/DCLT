@@ -50,7 +50,7 @@ class cl_module_cross_attention(nn.Module):
         self.data_name = Path(configs.data_path).stem if configs.data_path else '' # 去掉.csv后缀，便于后续的索引
         path =  "/home/wms/South/DCLT/PatchTST_supervised/pretrained_conf/pretrained_conf.yaml"
         self.yaml_cfg = OmegaConf.load(path)
-        self.model_path, self.extra_dataset_path = self.__init_path()
+        self.model_path, self.extra_dataset_path = self._init_path()
         self.load_mode = self.yaml_cfg.load_mode
         self.model_state = self.yaml_cfg.model_state
         self.use_extra_dataset = self.yaml_cfg.use_extra_dataset
@@ -79,7 +79,7 @@ class cl_module_cross_attention(nn.Module):
             self.cross_proj = nn.Linear(self.pretrained_model.head_args.final_out_dim, d_model)  # 用于维度变换,对齐cross_attention的维度
             self.cross_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
     
-    def __init_path(self,):
+    def _init_path(self,):
         model_root_path = self.yaml_cfg.root_dir
         model_path = os.path.join(model_root_path, f"{self.data_name}/")
         extra_dataset_root_path = self.yaml_cfg.root_dataset_path

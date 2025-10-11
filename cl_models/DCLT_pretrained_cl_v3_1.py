@@ -66,10 +66,10 @@ class LitModel(L.LightningModule):
         self.stride = cfg.model.stride
         self.padding_patch = cfg.model.padding_patch
 
-        patch_num = int((self.seq_len - self.patch_len) / self.stride + 1)
+        self.patch_num = int((self.seq_len - self.patch_len) / self.stride + 1)
         if self.padding_patch == "end":  # can be modified to general case
             self.padding_patch_layer = nn.ReplicationPad1d((0, self.stride))
-            patch_num += 1
+            self.patch_num += 1
 
         # decomposition
         self.decompose_layer = LearnableDecompose(
@@ -100,6 +100,7 @@ class LitModel(L.LightningModule):
             d_model=self.patch_len, fusion_type=cfg.model.fusion.fusion_type
         )
 
+        self.proj_dim = 2 * self.patch_len
         # projection head
         self.proj_head = TokenProjectionHead(
             in_dim=self.patch_len,
@@ -110,7 +111,7 @@ class LitModel(L.LightningModule):
         # reconstruction module
         self.decoder = TokenDecoder(
             proj_dim=2 * self.patch_len,
-            num_patches=patch_num,
+            num_patches=self.patch_num,
             seq_len=self.seq_len,
             out_channels=self.n_vars,
             weight_mse=cfg.model.decoder.weight_mse,
@@ -124,6 +125,7 @@ class LitModel(L.LightningModule):
             min_weight=cfg.model.cl_loss.min_weight,
             normalize=cfg.model.cl_loss.normalize,
         )
+        self.save_hyperparameters()
 
     def configure_optimizers(self):
         """配置优化器(AdamW, 可按需扩展 scheduler)"""
@@ -132,6 +134,7 @@ class LitModel(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         # norm
+        # x(B, C, L)
         x_remain, y = batch
         x = x_remain
 
@@ -180,7 +183,52 @@ class LitModel(L.LightningModule):
         x_proj_enhance = x_proj_enhance.reshape(B, C, N, K, -1)
         loss = self.loss_calculator(x_proj, x_proj_enhance)
 
-        return loss + other_loss
+        total_loss = loss + other_loss
+
+        batch_size = x_remain.size(0)
+        self.log(
+            "train_loss",
+            total_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            batch_size=batch_size,
+        )
+
+        return total_loss
+    
+    def forward(self, x):
+        # do patching
+        if self.padding_patch == "end":
+            x = self.padding_patch_layer(x)
+        x = x.unfold(dimension=-1, size=self.patch_len, step=self.stride)
+        x = x.permute(0, 1, 3, 2)
+        B, C, P, N = x.shape
+        x = x.reshape(B * N, C, P)
+
+        # decompose
+        x_trend, x_season = self.decompose_layer(x)
+
+        x_trend = x_trend.reshape(B, N, C, P)
+        x_season = x_season.reshape(B, N, C, P)
+        x_trend = x_trend.reshape(B * C, N, P)
+        x_season = x_season.reshape(B * C, N, P)
+
+        # encoder
+        x_trend_emb = self.trend_encoder(x_trend)
+        x_season_emb = self.season_encoder(x_season)
+
+        # fusion
+        self_samples = self.fusion(x_trend_emb, x_season_emb)
+        self_samples = self_samples.unsqueeze(2)
+
+        # projection head
+        x_proj = self.proj_head(self_samples)
+        x_proj = x_proj.squeeze(2)
+        x_proj = x_proj.reshape(B, C, N, -1)
+
+        return x_proj
 
     def gennerate_cl_samples(self, x_trend_emb, x_season_emb):
         """
@@ -419,7 +467,7 @@ if __name__ == "__main__":
     train_loader = DataLoader(dataset, batch_size=cfg.train.batch_size, shuffle=True)
 
     trainer = L.Trainer(
-        max_epochs=cfg.train.epochs,
+        max_epochs=cfg.train.max_epochs,
         devices="auto",
         log_every_n_steps=1,
         accelerator="auto",

@@ -1,9 +1,24 @@
+model_name: DCLT_pretrained_cl_v3
+seed: 42
+
 train:
   device: cuda:0
-  epochs: 10
+  devices: 1
+  max_epochs: 200
   lr: 1e-5
-  batch_size: 8
-
+  batch_size: 16
+  best_log_every: 10
+  benchmark: False # 是否开启 cudnn.benchmark（仅在输入尺寸固定时开启以提升速度）
+  early_stop:
+    enable: True
+    monitor: train_loss   # 没有验证集时只能用 train_loss；若以后加 val_loss 改成 val_loss
+    mode: min             # 目标是最小化该指标
+    patience: 15           # 容忍多少个 epoch 无提升
+    min_delta: 0.005       # 认为“有改善”所需的最小变化量
+    check_on_train_epoch_end: True  # 只监控 train_loss 时需在 epoch 结束检查
+path:
+  log_path: logs
+  checkpoint_path: checkpoints
 
 model:
   seq_len: 336
@@ -47,9 +62,14 @@ model:
     rec_weight: 0.5 # 重构损失权重
     loss_chunks: 8 # 计算对比学习损失时的batch拆分块数
 
-
 dataset:
   name: electricity
   normalize: True
   dropna: True
   n_vars: 321
+
+
+predict:
+  root_dir: /home/wms/South/DCLT/checkpoints/
+  load_mode: ckpt # 'ckpt' | 'pth' | 'pt'
+  model_state: fine_tune # 'reason', 'fine_tune'

@@ -143,8 +143,9 @@ class LitModel(L.LightningModule):
         K = x_proj_enhance.shape[2]
         x_proj_enhance = x_proj_enhance.reshape(B, C, N, K, -1)
         loss = self.loss_calculator(x_proj, x_proj_enhance)
+        loss += other_loss
 
-        return loss + other_loss
+        return loss
 
     def gennerate_cl_samples(self, x_trend_emb, x_season_emb):
         """
