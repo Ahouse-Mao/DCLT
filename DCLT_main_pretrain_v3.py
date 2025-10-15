@@ -1,6 +1,7 @@
 import os
 import datetime
 import logging
+from typing import Optional
 import torch
 import pytorch_lightning as L
 
@@ -89,11 +90,32 @@ def select_cl_model(cfg: DictConfig):
 #     cfg.dataset.dtw_path = os.path.join(root_path, "DTW_matrix", f"{cfg.dataset.name}.csv")
 #     return cfg 
 
+def init_n_vars(cfg):
+    if cfg.dataset.name == 'ETTh1':
+        cfg.dataset.n_vars = 7
+    elif cfg.dataset.name == 'ETTh2':
+        cfg.dataset.n_vars = 7
+    elif cfg.dataset.name == 'ETTm1':
+        cfg.dataset.n_vars = 7
+    elif cfg.dataset.name == 'ETTm2':
+        cfg.dataset.n_vars = 7
+    elif cfg.dataset.name == 'weather':
+        cfg.dataset.n_vars = 21
+    elif cfg.dataset.name == 'electricity':
+        cfg.dataset.n_vars = 321
+    elif cfg.dataset.name == 'Solar':
+        cfg.dataset.n_vars = 137
+    elif cfg.dataset.name == 'Traffic':
+        cfg.dataset.n_vars = 862
+    elif cfg.dataset.name == 'ILI':
+        cfg.dataset.n_vars = 7
+    else:
+        raise ValueError(f"Unknown dataset: {cfg.dataset.name}")
+    return cfg
+
 @hydra.main(version_base=None, config_path="cl_conf", config_name="pretrain_cfg_v3")
 def main(cfg: DictConfig) -> None:
-    # =============================
     # 0. 基础环境与配置打印
-    # =============================
     # 先初始化日志（否则 INFO 级别不会显示）
     time_tag = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     project_root = get_original_cwd()
@@ -104,14 +126,13 @@ def main(cfg: DictConfig) -> None:
 
     # logger.info(f"Available GPUs: {torch.cuda.device_count()}")
     # logger.info(f"Using GPU ID: {cfg.gpu_id}")
+    cfg = init_n_vars(cfg)
     print_cfg(cfg, logger)         # 仍沿用原打印函数（内部可再改 logger）
     seed_everything(cfg.seed)      # 统一随机种子，增强复现性
 
     # cfg = init_path(cfg)
 
-    # =============================
     # 1. 构建数据 (仅训练集; 暂不使用验证集)
-    # =============================
     dataset = DCLT_data_loader_v3(cfg=cfg)
 
     train_loader = DataLoader(
@@ -130,9 +151,7 @@ def main(cfg: DictConfig) -> None:
     except Exception as e:
         logger.warning(f"记录模型结构摘要失败: {e}")
 
-    # =============================
     # 2. 准备 checkpoints 与日志路径
-    # =============================
     # time_tag / project_root / log_base 已在开头生成，可复用
     ckpt_root = cfg.path.checkpoint_path
     dataset_ckpt_base = os.path.join(project_root, ckpt_root, dataset_name) # checkpoints/<dataset_name>/pretrain_<time_tag>
@@ -144,9 +163,7 @@ def main(cfg: DictConfig) -> None:
     tb_logger = TensorBoardLogger(save_dir=dataset_log_base, name='tb', version=time_tag, default_hp_metric=False)
     csv_logger = CSVLogger(save_dir=dataset_log_base, name='csv', version=time_tag)
 
-    # =============================
     # 3. 定义回调 (仅保存最优模型; 暂不启用 EarlyStopping)
-    # =============================
     monitor_metric = cfg.train.early_stop.monitor  # 若无验证集，默认监控训练损失
     if monitor_metric is None:
         monitor_metric = 'train_loss'
@@ -159,16 +176,16 @@ def main(cfg: DictConfig) -> None:
     )
     summary_cb = ModelSummary(max_depth=1)
 
-    # ============= 自定义：周期性输出“当前最优” =============
+    # 自定义：周期性输出“当前最优”
     class PeriodicBestLogger(Callback):
-        def __init__(self, period: int = 10):
+        def __init__(self, period: int = 10, log_extra: bool = False, extra_keys: Optional[list] = None):
             super().__init__()
             self.period = max(1, int(period))
+            self.log_extra = bool(log_extra)
+            self.extra_keys = list(extra_keys) if extra_keys else []
 
-        def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule):
+        def on_train_epoch_end(self, trainer, pl_module):
             epoch = trainer.current_epoch + 1
-            if epoch % self.period != 0 and epoch != 1:
-                return
 
             # 当前 epoch 指标（若有）
             current_metrics = {}
@@ -213,34 +230,36 @@ def main(cfg: DictConfig) -> None:
                             best_monitor = monitor
 
             # 组织输出
-            msg_head = f"[Epoch {epoch}] 周期性汇报："
+            msg_head = f"[Epoch {epoch}]"
             if current_metrics:
                 # 尽量输出与 monitor 一致的指标；若拿不到则挑几个常见项
                 focus_keys = [best_monitor] if best_monitor else []
                 if not focus_keys:
                     focus_keys = [k for k in ('train_loss', 'loss', 'lr') if k in current_metrics]
+                if self.log_extra and self.extra_keys:
+                    focus_keys.extend([k for k in self.extra_keys if k in current_metrics and k not in focus_keys])
                 preview = {k: current_metrics[k] for k in focus_keys if k in current_metrics}
                 if not preview:
                     # 回退：最多展示前 3 个指标
                     for k in list(current_metrics.keys())[:3]:
                         preview[k] = current_metrics[k]
-                logger.info(f"{msg_head}当前指标 {preview}")
+                logger.info(f"{msg_head} {preview}")
             else:
                 logger.info(f"{msg_head}当前指标获取为空（可能未使用 self.log(on_epoch=True)）")
 
             if best_score is not None:
-                logger.info(
-                    f"[Epoch {epoch}] 当前最优 {best_monitor}={best_score:.6f} (mode={best_mode}), 路径: {best_path}"
-                )
-            else:
-                logger.info(f"[Epoch {epoch}] 暂无最优指标（可能未配置 monitor 或未产生有效指标）")
+                pass
 
     best_log_every = cfg.train.best_log_every
-    periodic_best_cb = PeriodicBestLogger(period=best_log_every)
+    log_extra_metrics = cfg.train.get("log_extra_metrics", False)
+    extra_metric_keys = cfg.train.get("extra_metric_keys", None) if log_extra_metrics else None
+    periodic_best_cb = PeriodicBestLogger(
+        period=best_log_every,
+        log_extra=log_extra_metrics,
+        extra_keys=extra_metric_keys,
+    )
 
-    # =============================
     # 3.1 EarlyStopping (可选)
-    # =============================
     early_stop_cfg = cfg.train.early_stop
     early_stop_cb = None
     if early_stop_cfg.enable:
@@ -258,9 +277,7 @@ def main(cfg: DictConfig) -> None:
     else:
         logger.info("EarlyStopping disabled")
 
-    # =============================
     # 4. 构建 Trainer （仅训练，无验证）
-    # =============================
     max_epochs = cfg.train.max_epochs
     callbacks = [checkpoint_cb, summary_cb, periodic_best_cb]
     if early_stop_cb:
@@ -276,14 +293,10 @@ def main(cfg: DictConfig) -> None:
         logger=[tb_logger, csv_logger]
     )
 
-    # =============================
     # 5. 启动训练
-    # =============================
     trainer.fit(model, train_dataloaders=train_loader)  # 不传 val_dataloaders -> 纯训练
 
-    # =============================
     # 6. 保存模型权重 (LightningModule state_dict)
-    # =============================
     final_ckpt_path = os.path.join(ckpt_dir, 'final_model.pt')
     torch.save(model.state_dict(), final_ckpt_path)
     logger.info(f"Saved final weights to: {final_ckpt_path}")
@@ -293,9 +306,7 @@ def main(cfg: DictConfig) -> None:
     torch.save(model, full_model_path)
     logger.info(f"Saved full model to: {full_model_path}")
 
-    # =============================
     # 7. 输出 checkpoint 信息
-    # =============================
     if checkpoint_cb.best_model_path:
         logger.info(f"Best checkpoint: {checkpoint_cb.best_model_path}")
     else:
@@ -304,21 +315,57 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"TensorBoard logs dir: {tb_logger.log_dir}")
     logger.info(f"CSV logs dir: {csv_logger.log_dir}")
 
-    # # =============================
-    # # 8. 调整为推理模式
-    # # =============================
-    # dataset_pred = DCLT_pred_dataset(data_path=cfg.dataset.path)
-    # dataloader_pred = DataLoader(
-    #     dataset_pred,
-    #     batch_size=cfg.light_model.trainer.batch_size,
-    #     shuffle=False,
-    # )
-    # model.eval()
-    # model.freeze()
-    # x_list = trainer.predict(model, dataloaders=dataloader_pred)
-    # x = torch.cat(x_list, dim=0)
-    # x = x.squeeze(1)  # (num_vars, final_out_dim)
-    # print(x)
+    # 8.线性探测
+    if cfg.evaluation.enable:
+        if cfg.evaluation.task_name == "forecasting":
+            try:
+                from layers.Linear_Probing import eval_forecasting as lp_eval_forecasting
+            except Exception as e:
+                logger.error(f"导入 eval_forecasting 失败: {e}")
+                return
+
+            # 评估 DataLoader：这里复用训练集划分时间顺序切分
+            eval_dataset = DCLT_data_loader_v3(cfg=cfg)  # 与训练一致的标准化和窗口
+            eval_loader = DataLoader(eval_dataset, batch_size=cfg.train.batch_size, shuffle=False)
+
+            pred_lens = [24, 48, 96, 192, 336, 720]
+            scaler = eval_dataset.scaler
+
+            # 适配新版线性探测：默认使用展平特征，可通过 cfg.evaluation.* 覆盖相关参数
+            pool_mode = cfg.evaluation.get("feature_mode", cfg.evaluation.get("pool", "flatten"))
+            probe_method = cfg.evaluation.get("method", "ridge")
+            extract_max_batches = cfg.evaluation.get("extract_max_batches", None)
+            extract_sample_ratio = cfg.evaluation.get("extract_sample_ratio", None)
+            ridge_max_samples = cfg.evaluation.get("ridge_max_samples", 100000)
+
+            out_log, eval_res = lp_eval_forecasting(
+                model,
+                eval_loader,
+                scaler,
+                pred_lens=pred_lens,
+                pool=pool_mode,
+                method=probe_method,
+                extract_max_batches=extract_max_batches,
+                extract_sample_ratio=extract_sample_ratio,
+                ridge_max_samples=ridge_max_samples,
+            )
+
+            # 简要打印指标
+            for pred_len_key, vals in eval_res['metrics_raw'].items():
+                mae, mse, rmse, mape, mspe, rse, corr = vals
+                logger.info(
+                    f"[LinearProbe Forecasting] pred_len={pred_len_key} | raw: "
+                    f"MAE={mae:.4f}, MSE={mse:.4f}, RMSE={rmse:.4f}, MAPE={mape:.4f}, MSPE={mspe:.4f}, RSE={rse:.4f}, CORR={corr:.4f}"
+                )
+            for pred_len_key, vals in eval_res['metrics_norm'].items():
+                mae, mse, rmse, mape, mspe, rse, corr = vals
+                logger.info(
+                    f"[LinearProbe Forecasting] pred_len={pred_len_key} | norm: "
+                    f"MAE={mae:.4f}, MSE={mse:.4f}, RMSE={rmse:.4f}, MAPE={mape:.4f}, MSPE={mspe:.4f}, RSE={rse:.4f}, CORR={corr:.4f}"
+                )
+        else:
+            logger.warning(f"未知的 evaluation.task_name: {cfg.evaluation.task_name}")
+
 
 if __name__ == "__main__":
     # 允许直接 python DCLT_main_pretrain.py 运行；Hydra 会接管参数与工作目录

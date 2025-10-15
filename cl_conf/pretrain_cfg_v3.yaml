@@ -5,10 +5,12 @@ train:
   device: cuda:0
   devices: 1
   max_epochs: 200
-  lr: 1e-5
-  batch_size: 16
+  lr: 1e-3
+  batch_size: 40
   best_log_every: 10
   benchmark: False # 是否开启 cudnn.benchmark（仅在输入尺寸固定时开启以提升速度）
+  log_extra_metrics: True # 开启额外指标监控
+  extra_metric_keys: [cl_loss, spectral_loss, ortho_loss, rec_loss]
   early_stop:
     enable: True
     monitor: train_loss   # 没有验证集时只能用 train_loss；若以后加 val_loss 改成 val_loss
@@ -16,16 +18,23 @@ train:
     patience: 15           # 容忍多少个 epoch 无提升
     min_delta: 0.005       # 认为“有改善”所需的最小变化量
     check_on_train_epoch_end: True  # 只监控 train_loss 时需在 epoch 结束检查
+evaluation:
+  enable: True
+  task_name: forecasting
+  feature_mode: flatten # 'flatten' | 'pool'
+  method: ridge
+  extract_max_batches: 32
+  extract_sample_ratio: 0.1
+  ridge_max_samples: 100000
+
 path:
   log_path: logs
   checkpoint_path: checkpoints
-
 model:
-  seq_len: 336
-  pred_len: 96
-  stride: 8
-  patch_len: 128
-  patch_stride: 8
+  seq_len: 96
+  pred_len: 720
+  stride: 4
+  patch_len: 64
   padding_patch: True
   revin:
     use_revin: True
@@ -45,28 +54,27 @@ model:
   decoder:
     weight_mse: 0.5 # 这俩参数需要调整
     weight_cos: 0.5
-  cl:
-    shift_type: shift_both # 'shift_trend', 'shift_season', 'shift_both'
-  cl_loss:
-    sigma: 1.0 # 软对比学习参数
-    invert: False # 是否要反转软对比学习的计算逻辑, False的逻辑是近大远小, True的逻辑是近小远大
-    min_weight: 1e-6 # 软对比学习中最小权重
-    normalize: False # 是否归一化权重
-    w_enh: 2.0 # 增强样本的权重
-    w_neighbor: 0.8 # 邻近样本的权重
-    gamma: 1.0 # 同变量负样本样本权重指数
-    temperature: 0.1 # 对比学习温度系数
-    cl_weight: 1.0 # 对比学习总损失权重
-    spectral_weight: 0.2 # 频域损失权重
-    ortho_weight: 0.2 # 正交损失权重
-    rec_weight: 0.5 # 重构损失权重
-    loss_chunks: 8 # 计算对比学习损失时的batch拆分块数
-
+  soft_cl_ctrl:
+    shift_type: shift_both # 生成正样本的方式'shift_trend', 'shift_season', 'shift_both'
+    cl_weight: 0.7 # 软对比学习总损失权重
+    use_instance_cl: False
+    use_temporal_cl: True
+    weight_mode: patch_and_dist_sim # patch_sim(仅使用patch_sim, 没有的部分用dist_sim补足) | dist_sim | patch_and_dist_sim(混合, 使用不同权重)
+  soft_cl_params:
+    temperature: 0.1
+    patch_sim_weight: 0.5 # patch_sim的权重, dist_sim的权重为1-patch_sim_weight
+    tau_temporal: 0.35 # temporal similarity的衰减系数, 越大表示越重视远距离的时间点
+  other_loss:
+    use_other_loss: True
+    spectral_weight: 0.1 # 频域损失权重
+    ortho_weight: 0.1 # 正交损失权重
+    rec_weight: 0.1 # 重构损失权重
+    
 dataset:
-  name: electricity
+  name: weather # 'ETTh1' | 'ETTh2' | 'ETTm1' | 'ETTm2' | 'electricity' | 'exchange_rate' | 'traffic' | 'weather' | 'ILI'
   normalize: True
   dropna: True
-  n_vars: 321
+  n_vars: None # 主函数中会根据数据集自动设置
 
 
 predict:

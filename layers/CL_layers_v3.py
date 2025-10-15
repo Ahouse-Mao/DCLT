@@ -5,34 +5,105 @@ import torch.nn.functional as F
 
 
 class LearnableDecompose(nn.Module):
-    def __init__(self, channels, kernel_size=9, groups=None, init_avg=True):
-        """
-        channels: 输入通道数(变量数)
-        kernel_size: 低通核大小(奇数最好),这样输入与输出长度相同
-        groups: groups 参数,默认 groups=channels (每通道独立滤波)
-        init_avg: 是否用平均滤波初始化
+    def __init__(
+        self,
+        channels: int,
+        small_kernel: int = 5,
+        large_kernel: int = 25,
+        groups: int | None = None,
+        init_avg: bool = True,
+    ) -> None:
+        """通道独立的大小核分组卷积,用于分解趋势(trend)与季节性(season)成分。
+
+        Args:
+            channels: 输入通道数。
+            small_kernel: 季节性分量的小卷积核(默认取奇数,不为奇数时自动 +1)。
+            large_kernel: 趋势分量的大卷积核(默认取奇数,不为奇数时自动 +1)。
+            groups: 分组卷积的组数,默认为 channels(完全通道独立)。
+            init_avg: 是否使用平滑平均/高通差分初始化卷积核,便于快速收敛。
         """
         super().__init__()
-        if groups is None:
-            groups = channels
-        pad = kernel_size // 2
-        self.lowpass = nn.Conv1d(
+
+        groups = channels if groups is None else groups
+        if channels % groups != 0:
+            raise ValueError(f"channels ({channels}) must be divisible by groups ({groups})")
+
+        # 保证 kernel 为奇数,以避免 padding 产生长度偏移
+        if small_kernel % 2 == 0:
+            small_kernel += 1
+        if large_kernel % 2 == 0:
+            large_kernel += 1
+
+        self.channels = channels
+        self.groups = groups
+        self.small_kernel = small_kernel
+        self.large_kernel = large_kernel
+
+        # 大核 depthwise 卷积提取趋势(低频)
+        self.trend_extractor = nn.Conv1d(
             in_channels=channels,
             out_channels=channels,
-            kernel_size=kernel_size,
-            padding=pad,
+            kernel_size=large_kernel,
+            stride=1,
+            padding=large_kernel // 2,
             groups=groups,
             bias=False,
         )
-        if init_avg:
-            with torch.no_grad():
-                self.lowpass.weight.fill_(1.0 / kernel_size)
-        self.alpha = nn.Parameter(torch.tensor(1.0))  # 可学习缩放
 
-    def forward(self, x: torch.Tensor):
-        # x: (B*N, C, P) 或 (B, C, L) 视使用场景而定
-        trend = self.lowpass(x) * self.alpha
-        season = x - trend
+        # 小核 depthwise 卷积提取季节/残差(高频)
+        self.season_extractor = nn.Conv1d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=small_kernel,
+            stride=1,
+            padding=small_kernel // 2,
+            groups=groups,
+            bias=False,
+        )
+
+        self.alpha_trend = nn.Parameter(torch.tensor(1.0))
+        self.alpha_season = nn.Parameter(torch.tensor(1.0))
+
+        if init_avg:
+            self._init_average_kernels()
+
+    def _init_average_kernels(self) -> None:
+        """使用平滑平均/高通残差初始化卷积核,便于快速学习。"""
+        with torch.no_grad():
+            # 趋势核: 深度可分的大核平均滤波
+            trend_weight = torch.full_like(
+                self.trend_extractor.weight,
+                fill_value=1.0 / self.large_kernel,
+            )
+            self.trend_extractor.weight.copy_(trend_weight)
+
+            # 季节核: 单位脉冲减去平均,形成高通滤波器
+            season_weight = torch.zeros_like(self.season_extractor.weight)
+            mid = self.small_kernel // 2
+            season_weight[..., mid] = 1.0
+            season_weight -= torch.full_like(
+                season_weight,
+                fill_value=1.0 / self.small_kernel,
+            )
+            self.season_extractor.weight.copy_(season_weight)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """执行趋势与季节性分解。
+
+        Args:
+            x: 形状 (B, C, L) 或 (B*N, C, P) 的特征序列。
+
+        Returns:
+            trend: 经过大核平滑后的低频趋势分量。
+            season: 从残差中提取的小尺度季节分量。
+        """
+        trend_raw = self.trend_extractor(x)
+        trend = trend_raw * self.alpha_trend
+
+        residual = x - trend
+        season_raw = self.season_extractor(residual)
+        season = season_raw * self.alpha_season
+
         return trend, season
 
 class Encoder(nn.Module):
@@ -282,72 +353,6 @@ class TokenDecoder(nn.Module):
         rec_loss = self.weight_mse * mse_loss + self.weight_cos * cosine_loss
 
         return rec_loss
-    
-class Soft_CL_weight():
-    """
-    软对比学习权重分配
-
-    功能：
-      - 根据 patch 之间的时间/位置距离,生成 (Q, N) 的权重矩阵,
-        其中 Q 是 anchor 的数量(B*C*N),N 是每个变量的 patch 数量。
-      - 原始函数为： w(d) = 2 / (1 + exp(dist * sigma)) (distance 越小权重越大)
-      - 支持参数：
-          sigma: 控制衰减陡峭度(sigma 越大,远处更快衰减,近邻更占优)
-          invert: 若 True 则使用 1 - sigmoid(把近优转为远优)
-          min_weight: 小权重阈值,低于此值的置 0(节省计算并提高稀疏性)
-          normalize: 是否对每行(每个 anchor)在同变量段内部做归一化(使该段内部和为1)
-          clamp_max: 为数值稳定,把 exp 的参数裁剪到 [0, clamp_max]
-    用法：
-      t = TimeLagSigmoid(sigma=1.0, invert=False)
-      same_weights = t.compute(n_idx, N, device)  # 返回 (Q, N)
-    """
-    def __init__(self, sigma=1.0, invert=False, min_weight=1e-6, normalize=False, dtype=torch.float32):
-        self.sigma = float(sigma)
-        self.invert = bool(invert)
-        self.min_weight = float(min_weight)
-        self.normalize = bool(normalize)
-        self.dtype = dtype
-
-    def compute(self, n_idx, N):
-        """
-        计算同变量段的权重矩阵
-        参数:
-          n_idx: torch.LongTensor, shape (Q,), 每个扁平 anchor 对应的 patch 索引 n (0..N-1)
-          N: int, 每变量 patch 数量
-          device: 设备
-          dtype: 返回张量的数据类型
-        返回:
-          weights_same: torch.Tensor, shape (Q, N), dtype 指定的浮点
-            已经把 anchor 自身与左右邻居位置置 0(mask)。
-        """
-        Q = n_idx.shape[0]
-        device = n_idx.device  # 保持与输入索引一致的设备
-
-        # m_idx: (1, N) -> [0,1,...,N-1]
-        m_idx = torch.arange(N, device=device, dtype=n_idx.dtype).unsqueeze(0)
-
-        # n_idx_repeat: (Q, 1)
-        n_idx_repeat = n_idx.unsqueeze(1)  # (Q, 1)
-
-        # dist: (Q, N) 绝对距离矩阵
-        dist = torch.abs(n_idx_repeat - m_idx)  # (Q, N)
-
-        # 用稳定形式计算 timelag_sigmoid：2 * sigmoid(-dist * sigma)
-        # 这里不用直接 exp(clamp(...))，使用 sigmoid 更稳定
-        same_w = 2.0 * torch.sigmoid(-dist * self.sigma)  # (Q, N)
-
-        # 把非常小的权重置 0（稀疏化）
-        if self.min_weight is not None and self.min_weight > 0:
-            same_w = torch.where(
-                same_w < self.min_weight, torch.zeros_like(same_w), same_w
-            )
-
-        # 可选：对同变量段按行归一化（每个 anchor 的行和为 1）
-        if self.normalize:
-            row_sum = same_w.sum(dim=1, keepdim=True)  # (Q, 1)
-            same_w = same_w / (row_sum + 1e-12)
-
-        return same_w.to(device=device, dtype=self.dtype)
 
 def spectral_loss_from_raw(trend_raw, season_raw, cutoff_ratio=0.2):
     """
@@ -393,10 +398,6 @@ def token_ortho_loss(z_tr, z_se):
     se_flat = z_se.view(Bp * N, D)
     cos = F.cosine_similarity(tr_flat, se_flat, dim=-1)  # (Bp*N,)
     return (cos ** 2).mean()
-
-
-
-
 
 
 # ===== Rotary Positional Embedding (RoPE) utilities =====
