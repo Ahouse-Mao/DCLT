@@ -22,7 +22,7 @@ class PatchTST_backbone(nn.Module):
                  padding_var:Optional[int]=None, attn_mask:Optional[Tensor]=None, res_attention:bool=True, pre_norm:bool=False, store_attn:bool=False,
                  pe:str='zeros', learn_pe:bool=True, fc_dropout:float=0., head_dropout = 0, padding_patch = None,
                  pretrain_head:bool=False, head_type = 'flatten', individual = False, revin = True, affine = True, subtract_last = False,
-                 verbose:bool=False, configs=None, **kwargs):
+                 verbose:bool=False, configs=None, cross_attn_heads:int=4, cross_attn_dropout:float=0., **kwargs):
         
         super().__init__()
         
@@ -45,10 +45,21 @@ class PatchTST_backbone(nn.Module):
         self.use_pretrained_cl = configs.use_pretrained_cl  # 是否使用预训练的cl模型
         self.embedding = Pretrained_emb(configs)
         patch_num = self.embedding.pretrained_model.patch_num
+        self.enable_cross_attn = configs.enable_cross_attn
 
         # 为了避免参数出问题, 从embedding里提取参数
         patch_len = self.embedding.pretrained_model.patch_len
         d_model = self.embedding.pretrained_model.proj_dim
+
+        if self.enable_cross_attn:
+            self.cross_attn = nn.MultiheadAttention(
+                embed_dim=d_model,
+                num_heads=cross_attn_heads,
+                dropout=cross_attn_dropout,
+                batch_first=True,
+            )
+            self.cross_attn_dropout = nn.Dropout(cross_attn_dropout)
+            self.cross_attn_norm = nn.LayerNorm(d_model)
 
         # Backbone 
         self.backbone = TSTiEncoder(c_in, patch_num=patch_num, patch_len=patch_len, max_seq_len=max_seq_len,
@@ -84,6 +95,15 @@ class PatchTST_backbone(nn.Module):
         # z = z.permute(0,1,3,2)                                                              # z: [bs x nvars x patch_len x patch_num]
         if self.use_pretrained_cl:
             z = self.embedding(z)  # 使用预训练模型进行特征提取
+            if self.enable_cross_attn:
+                if z.dim() != 4:
+                    raise ValueError(f"Expected embedding output with 4 dims, got shape {z.shape}")
+                bsz, nvars, patch_num, d_model = z.shape
+                cross_in = z.permute(0, 2, 1, 3).contiguous().view(bsz * patch_num, nvars, d_model)
+                attn_out, _ = self.cross_attn(cross_in, cross_in, cross_in)
+                cross_in = self.cross_attn_norm(cross_in + self.cross_attn_dropout(attn_out))
+                z = cross_in.view(bsz, patch_num, nvars, d_model).permute(0, 2, 1, 3).contiguous()
+        
 
         # model
         z = self.backbone(z)                                                                # z: [bs x nvars x d_model x patch_num]

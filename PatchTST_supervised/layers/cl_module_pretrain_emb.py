@@ -30,51 +30,37 @@ class Pretrained_emb(nn.Module):
         在给定目录下找时间最新的文件夹,然后把文件夹名加入model_dir并返回
         """
         model_dir = self.model_path
-        try:
-            if not os.path.exists(model_dir):
-                raise FileNotFoundError(f"目录不存在: {model_dir}")
-            
-            # 获取目录下所有子文件夹及其修改时间
-            subdirs = [
-                (item, os.path.getmtime(os.path.join(model_dir, item)))
-                for item in os.listdir(model_dir)
-                if os.path.isdir(os.path.join(model_dir, item))
-            ]
-            
-            if not subdirs:
-                raise FileNotFoundError(f"在 {model_dir} 中没有找到任何子文件夹")
-            
-            # 按修改时间排序，获取最新的文件夹
-            latest_dir = max(subdirs, key=lambda x: x[1])[0]
-            model_dir = os.path.join(model_dir, latest_dir)
-            
-            if self.load_mode == 'ckpt':
-                # 获取文件夹中对应后缀的文件
-                ckpt_files = [f for f in os.listdir(model_dir) if f.endswith('.ckpt')]
-                if not ckpt_files:
-                    raise FileNotFoundError(f"在 {model_dir} 中没有找到 .ckpt 文件")
-                
-                # 如果有多个.ckpt文件，选择最新的
-                ckpt_file = max(ckpt_files, key=lambda x: os.path.getmtime(os.path.join(model_dir, x)))
-                ckpt_path = os.path.join(model_dir, ckpt_file)
-                
-                # 加载模型
-                model = LitModel.load_from_checkpoint(ckpt_path, cfg=self.cfg)
-            elif self.load_mode == 'pth':
-                pass
-                # state_dict = torch.load(pt_path, map_location='cuda')
-                # model = LitModel()
-                # model.load_state_dict(state_dict)
-            elif self.load_mode == 'pt':
-                pass
-                # state_dict = torch.load(pt_path, map_location='cuda')
-                # model = LitModel()
-                # model.load_state_dict(state_dict['state_dict'], strict=False)
-
-            return model
-                
-        except:
+        if not os.path.exists(model_dir):
+            raise FileNotFoundError(f"目录不存在: {model_dir}")
+        
+        # 获取目录下所有子文件夹及其修改时间
+        subdirs = [
+            (item, os.path.getmtime(os.path.join(model_dir, item)))
+            for item in os.listdir(model_dir)
+            if os.path.isdir(os.path.join(model_dir, item))
+        ]
+        
+        if not subdirs:
             raise FileNotFoundError(f"在 {model_dir} 中没有找到任何子文件夹")
+        
+        # 按修改时间排序，获取最新的文件夹
+        latest_dir = max(subdirs, key=lambda x: x[1])[0]
+        model_dir = os.path.join(model_dir, latest_dir)
+        
+        if self.load_mode == 'ckpt':
+            # 获取文件夹中对应后缀的文件
+            ckpt_files = [f for f in os.listdir(model_dir) if f.endswith('.ckpt')]
+            if not ckpt_files:
+                raise FileNotFoundError(f"在 {model_dir} 中没有找到 .ckpt 文件")
+            
+            # 如果有多个.ckpt文件，选择最新的
+            ckpt_file = max(ckpt_files, key=lambda x: os.path.getmtime(os.path.join(model_dir, x)))
+            ckpt_path = os.path.join(model_dir, ckpt_file)
+            
+            # 加载模型
+            model = LitModel.load_from_checkpoint(ckpt_path, cfg=self.cfg)
+
+        return model
 
     def _init_state_of_model(self,):
         if self.model_state == 'reason':

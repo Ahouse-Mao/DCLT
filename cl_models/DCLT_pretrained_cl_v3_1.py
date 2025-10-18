@@ -64,6 +64,7 @@ class LitModel(L.LightningModule):
 
         # revin参数
         self.revin = cfg.model.revin.use_revin
+        cfg = self.init_n_vars(cfg)
         self.n_vars = cfg.dataset.n_vars
         if self.revin:
             self.revin_layer = RevIN(
@@ -142,6 +143,29 @@ class LitModel(L.LightningModule):
             )
 
         self.save_hyperparameters()
+    
+    def init_n_vars(self, cfg):
+        if cfg.dataset.name == 'ETTh1':
+            cfg.dataset.n_vars = 7
+        elif cfg.dataset.name == 'ETTh2':
+            cfg.dataset.n_vars = 7
+        elif cfg.dataset.name == 'ETTm1':
+            cfg.dataset.n_vars = 7
+        elif cfg.dataset.name == 'ETTm2':
+            cfg.dataset.n_vars = 7
+        elif cfg.dataset.name == 'weather':
+            cfg.dataset.n_vars = 21
+        elif cfg.dataset.name == 'electricity':
+            cfg.dataset.n_vars = 321
+        elif cfg.dataset.name == 'Solar':
+            cfg.dataset.n_vars = 137
+        elif cfg.dataset.name == 'Traffic':
+            cfg.dataset.n_vars = 862
+        elif cfg.dataset.name == 'ILI':
+            cfg.dataset.n_vars = 7
+        else:
+            raise ValueError(f"Unknown dataset: {cfg.dataset.name}")
+        return cfg
 
     def configure_optimizers(self):
         """配置优化器(AdamW, 可按需扩展 scheduler)"""

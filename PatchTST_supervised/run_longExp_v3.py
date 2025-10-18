@@ -28,7 +28,7 @@ parser.add_argument('--model', type=str, default='PatchTST_pretrained_v3',
 # data loader
 parser.add_argument('--data', type=str, default='custom', help='dataset type')
 parser.add_argument('--root_path', type=str, default='./dataset/', help='root path of the data file')
-parser.add_argument('--data_path', type=str, default='electricity.csv', help='data file')
+parser.add_argument('--data_path', type=str, default='weather.csv', help='data file')
 parser.add_argument('--features', type=str, default='M',
                     help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
 parser.add_argument('--target', type=str, default='OT', help='target feature in S or MS task')
@@ -37,7 +37,7 @@ parser.add_argument('--freq', type=str, default='h',
 parser.add_argument('--checkpoints', type=str, default='./PatchTST_supervised/checkpoints/', help='location of model checkpoints')
 
 # forecasting task
-parser.add_argument('--seq_len', type=int, default=336, help='input sequence length')
+parser.add_argument('--seq_len', type=int, default=96, help='input sequence length')
 parser.add_argument('--label_len', type=int, default=48, help='start token length')
 parser.add_argument('--pred_len', type=int, default=96, help='prediction sequence length')
 
@@ -60,10 +60,10 @@ parser.add_argument('--individual', type=int, default=0, help='individual head; 
 
 # Formers 
 parser.add_argument('--embed_type', type=int, default=0, help='0: default 1: value embedding + temporal embedding + positional embedding 2: value embedding + temporal embedding 3: value embedding + positional embedding 4: value embedding')
-parser.add_argument('--enc_in', type=int, default=321, help='encoder input size') # DLinear with --individual, use this hyperparameter as the number of channels
-parser.add_argument('--dec_in', type=int, default=321, help='decoder input size')
-parser.add_argument('--c_out', type=int, default=321, help='output size')
-parser.add_argument('--d_model', type=int, default=128, help='dimension of model')
+parser.add_argument('--enc_in', type=int, default=21, help='encoder input size') # DLinear with --individual, use this hyperparameter as the number of channels
+parser.add_argument('--dec_in', type=int, default=21, help='decoder input size')
+parser.add_argument('--c_out', type=int, default=21, help='output size')
+parser.add_argument('--d_model', type=int, default=256, help='dimension of model')
 parser.add_argument('--n_heads', type=int, default=16, help='num of heads')
 parser.add_argument('--e_layers', type=int, default=3, help='num of encoder layers')
 parser.add_argument('--d_layers', type=int, default=1, help='num of decoder layers')
@@ -113,7 +113,7 @@ parser.add_argument('--test_flop', action='store_true', default=False, help='See
 
 # v3版本的cl模型
 parser.add_argument('--use_pretrained_cl', type=bool, default=True, help='whether to use pretrained cl model; True 1 False 0')
-
+parser.add_argument('--enable_cross_attn', type=bool, default=True, help='whether to use cross-attention; True 1 False 0')
 
 args = parser.parse_args()
 
