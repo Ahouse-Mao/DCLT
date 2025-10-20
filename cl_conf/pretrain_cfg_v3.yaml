@@ -71,7 +71,7 @@ model:
     rec_weight: 0.1 # 重构损失权重
     
 dataset:
-  name: weather # 'ETTh1' | 'ETTh2' | 'ETTm1' | 'ETTm2' | 'electricity' | 'exchange_rate' | 'traffic' | 'weather' | 'ILI'
+  name: ETTh1 # 'ETTh1' | 'ETTh2' | 'ETTm1' | 'ETTm2' | 'electricity' | 'exchange_rate' | 'traffic' | 'weather' | 'ILI'
   normalize: True
   dropna: True
   n_vars: None # 主函数中会根据数据集自动设置
