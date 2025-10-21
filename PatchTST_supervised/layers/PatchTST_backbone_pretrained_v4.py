@@ -46,6 +46,8 @@ class PatchTST_backbone(nn.Module):
         self.enable_cross_attn = configs.enable_cross_attn  # 是否启用cross attention
         if self.use_pretrained_cl:
             self.embedding = load_pretrained_model(configs)
+            for param in self.embedding.parameters():
+                param.requires_grad = False
 
         if self.enable_cross_attn:
             self.cross_attn = nn.MultiheadAttention(

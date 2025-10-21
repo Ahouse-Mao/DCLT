@@ -98,6 +98,29 @@ def fix_seed(expid):
     torch.cuda.manual_seed_all(SEED)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+def init_n_vars(args):
+    if args.dataset == 'ETTh1':
+        args.n_vars = 7
+    elif args.dataset == 'ETTh2':
+        args.n_vars = 7
+    elif args.dataset == 'ETTm1':
+        args.n_vars = 7
+    elif args.dataset == 'ETTm2':
+        args.n_vars = 7
+    elif args.dataset == 'weather':
+        args.n_vars = 21
+    elif args.dataset == 'electricity':
+        args.n_vars = 321
+    elif args.dataset == 'Solar':
+        args.n_vars = 137
+    elif args.dataset == 'Traffic':
+        args.n_vars = 862
+    elif args.dataset == 'ILI':
+        args.n_vars = 7
+    else:
+        raise ValueError(f"Unknown dataset: {args.dataset}")
+    return args
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -105,12 +128,12 @@ if __name__ == '__main__':
     parser.add_argument('--loader', type=str, default="forecast_csv", help='The data loader used to load the experimental data. This can be set to UCR, UEA, forecast_csv, forecast_csv_univar, anomaly, or anomaly_coldstart')
     parser.add_argument('--dist_type', type=str, default='DTW')
     parser.add_argument('--gpu', type=int, default=0, help='The gpu no. used for training and inference (defaults to 0)')
-    parser.add_argument('--batch-size', type=int, default=64, help='The batch size (defaults to 8)')
+    parser.add_argument('--batch-size', type=int, default=24, help='The batch size (defaults to 8)')
     parser.add_argument('--lr', type=float, default=0.001, help='The learning rate (defaults to 0.001)')
     parser.add_argument('--repr-dims', type=int, default=256, help='The representation dimension (defaults to 320)')
-    parser.add_argument('--max-train-length', type=int, default=96, help='For sequence with a length greater than <max_train_length>, it would be cropped into some sequences, each of which has a length less than <max_train_length> (defaults to 3000)')
+    parser.add_argument('--max-train-length', type=int, default=500, help='For sequence with a length greater than <max_train_length>, it would be cropped into some sequences, each of which has a length less than <max_train_length> (defaults to 3000)')
     parser.add_argument('--iters', type=int, default=None, help='The number of iterations')
-    parser.add_argument('--epochs', type=int, default=600, help='The number of epochs')
+    parser.add_argument('--epochs', type=int, default=300, help='The number of epochs')
     parser.add_argument('--save-every', type=int, default=None, help='Save the checkpoint every <save_every> iterations/epochs')
     parser.add_argument('--seed', type=int, default=None, help='The random seed')
     parser.add_argument('--eval', type=bool, default=False, help='Whether to perform evaluation after training')
@@ -128,8 +151,10 @@ if __name__ == '__main__':
     parser.add_argument('--patch_len', type=int, default=16, help='The length of each patch when using patch-level contrastive learning')
     parser.add_argument('--patch_stride', type=int, default=2, help='The stride between patches when using patch-level contrastive learning')
     parser.add_argument('--depth', type=int, default=8, help='The depth of the model when using patch-level contrastive learning')
-
+    parser.add_argument('--revin', type=int, default=1, help='RevIN; True 1 False 0')
     args = parser.parse_args()
+
+    args = init_n_vars(args) # 根据数据集名称初始化 n_vars 参数
     
     print("Dataset:", args.dataset)
     print("Arguments:", str(args))
@@ -157,7 +182,7 @@ if __name__ == '__main__':
     # =============== Checkpoints 目录（根据用户要求） ===============
     # ./checkpoints/{dataset}/{patch_len}-{repr-dims}v4{时间戳}/
     timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-    ckpt_sub = f"{args.patch_len}-{args.repr_dims}v4{timestamp}"
+    ckpt_sub = f"{args.patch_len}-{args.repr_dims}_v4_{timestamp}"
     ckpt_dir = os.path.join('.', 'checkpoints', args.dataset, ckpt_sub)
     os.makedirs(ckpt_dir, exist_ok=True)
     
@@ -172,12 +197,14 @@ if __name__ == '__main__':
 
     print('Loading data... ', end='')
     test_data = None
+    valid_data = None
     if args.use_patch_cl:
         if args.loader == 'forecast_csv':
             task_type = 'forecasting'
             UNI = False
             data, train_slice, valid_slice, test_slice, scaler, pred_lens = datautils.load_forecast_csv_patch(args.dataset, args.max_train_length, univar=UNI)
             train_data = data[:, train_slice]
+            valid_data = data[:, valid_slice]
             test_data = data[:, test_slice]
             n_covariate_cols = 0
     else:
@@ -198,6 +225,7 @@ if __name__ == '__main__':
             UNI = False
             data, train_slice, valid_slice, test_slice, scaler, pred_lens, n_covariate_cols = datautils.load_forecast_csv(args.dataset, args.max_train_length, univar=UNI)
             train_data = data[:, train_slice]
+            valid_data = data[:, valid_slice]
             test_data = data[:, test_slice]
             
         elif args.loader == 'forecast_csv_univar':
@@ -227,6 +255,7 @@ if __name__ == '__main__':
                 raise ValueError(f"Task type {task_type} is not supported when irregular>0.")
     if args.use_patch_cl:
         config = dict(
+            n_vars=args.n_vars,
             batch_size=args.batch_size,
             lr=args.lr,
             tau_temp=args.tau_temp,
@@ -238,7 +267,8 @@ if __name__ == '__main__':
             # extra params
             patch_len = args.patch_len,
             patch_stride = args.patch_stride,
-            depth = args.depth
+            depth = args.depth,
+            revin = args.revin
         )
     else:
         config = dict(
@@ -263,11 +293,12 @@ if __name__ == '__main__':
     if args.use_patch_cl:
         input_dims_for_yaml = args.patch_len
         init_param_names = [
-            'patch_cl_ver','input_dims','output_dims','hidden_dims','depth','device','lr','batch_size',
+            'n_vars','patch_cl_ver','input_dims','output_dims','hidden_dims','depth','device','lr','batch_size',
             'lambda_','tau_temp','max_train_length','temporal_unit','soft_instance','soft_temporal',
             'patch_len','patch_stride','padding_patch'
         ]
         init_values = [
+            args.n_vars,
             args.patch_cl_ver,
             input_dims_for_yaml,
             args.repr_dims,
@@ -342,8 +373,10 @@ if __name__ == '__main__':
     else:
         loss_log = model.fit(
             train_data, 0, 0, 0,
-            sim_mat,run_dir, n_epochs=args.epochs, n_iters=args.iters,
-            verbose=True)
+            sim_mat, run_dir, n_epochs=args.epochs, n_iters=args.iters,
+            verbose=True,
+            valid_data=valid_data,
+            test_data_eval=test_data)
     
     # 训练结束：仅保留 latest.pkl 与 best.pkl（latest 在最后一个 epoch 回调中已更新）
     model.save(f'{run_dir}/model.pkl')

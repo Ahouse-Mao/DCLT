@@ -16,7 +16,7 @@ from sklearn.preprocessing import label_binarize
 from sklearn.metrics import average_precision_score
 
 from torch.utils.tensorboard import SummaryWriter
-
+from layers.RevIN import RevIN
 '''
 ver1:
 思路:
@@ -46,6 +46,7 @@ class TS2Vec:
         self,
         patch_cl_ver,
         input_dims,                    # 输入特征维度
+        n_vars=None,
         output_dims=320,               # 输出表示向量维度
         hidden_dims=64,                # 隐藏层维度
         depth=10,                      # 扩张卷积网络深度
@@ -62,7 +63,8 @@ class TS2Vec:
         soft_temporal=False,           # 是否启用时间级软对比学习
         patch_len=None,                # patch长度
         patch_stride=None,             # patch步幅
-        padding_patch="end"          # patch填充方式
+        padding_patch="end",           # patch填充方式
+        revin=True                 # 是否使用RevIN归一化
     ):
         """
         初始化TS2Vec模型
@@ -117,13 +119,107 @@ class TS2Vec:
         self.n_iters = 0    # 已训练的迭代数
 
         # 额外增加模块
+        # RevIn
+        self.revin = revin
+        if self.revin: 
+            if n_vars is None:
+                raise ValueError("当启用RevIN时，必须提供 n_vars 参数")
+            self.revin_layer = RevIN(n_vars, affine=False, subtract_last=0).to(self.device)
+
         self.patch_len = patch_len
         self.patch_stride = patch_stride
         self.padding_patch = padding_patch
         if self.padding_patch == "end":  # can be modified to general case
             self.padding_patch_layer = nn.ReplicationPad1d((0, self.patch_stride))
     
-    def fit(self, train_data, train_labels, test_data, test_labels, soft_labels, run_dir, n_epochs=None, n_iters=None, verbose=False):
+    def _compute_dataset_loss(self, data, soft_labels=None):
+        """只读评估：在不更新参数的情况下计算一个数据集的对比损失均值。
+        复用训练时的数据预处理、随机裁剪与损失定义，以获得可对比的指标。
+        """
+        if data is None or isinstance(data, (int, float)):
+            return None
+        assert data.ndim == 3
+
+        # 复制并应用与训练相同的预处理
+        eval_data = data
+        if self.max_train_length is not None:
+            sections = eval_data.shape[1] // self.max_train_length
+            if sections >= 2:
+                eval_data = np.concatenate(split_with_nan(eval_data, sections, axis=1), axis=0)
+
+        temporal_missing = np.isnan(eval_data).all(axis=-1).any(axis=0)
+        if temporal_missing[0] or temporal_missing[-1]:
+            eval_data = centerize_vary_length_series(eval_data)
+
+        eval_data = eval_data[~np.isnan(eval_data).all(axis=2).all(axis=1)]
+
+        dataset = custom_dataset(eval_data)
+        loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False, drop_last=False)
+
+        org_train_mode_net = self._net.training
+        self._net.eval()
+
+        cum_loss = 0.0
+        n_iters = 0
+        with torch.no_grad():
+            for x, idx in loader:
+                # 软标签子矩阵
+                if soft_labels is None:
+                    soft_labels_batch = None
+                else:
+                    soft_labels_batch = soft_labels[idx][:, idx]
+
+                # 长序列随机裁剪与预处理
+                if self.max_train_length is not None and x.size(1) > self.max_train_length:
+                    window_offset = np.random.randint(x.size(1) - self.max_train_length + 1)
+                    x = x[:, window_offset: window_offset + self.max_train_length]
+                x = x.to(self.device)
+
+                x = x.reshape(x.shape[0], x.shape[2], -1)
+                if self.revin:
+                    x = x.permute(0, 2, 1)
+                    x = self.revin_layer(x, 'norm')
+                    x = x.permute(0, 2, 1)
+                if self.padding_patch == 'end':
+                    x = self.padding_patch_layer(x)
+                x = x.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)  # (B, C, N, P)
+                B, C, N, P = x.shape
+                x = x.reshape(B * C, N, P)
+
+                ts_l = x.size(1)
+                crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=ts_l + 1)
+                crop_left = np.random.randint(ts_l - crop_l + 1)
+                crop_right = crop_left + crop_l
+                crop_eleft = np.random.randint(crop_left + 1)
+                crop_eright = np.random.randint(low=crop_right, high=ts_l + 1)
+                crop_offset = np.random.randint(low=-crop_eleft, high=ts_l - crop_eright + 1, size=x.size(0))
+
+                out1_all = self._net(take_per_row(x, crop_offset + crop_eleft, crop_right - crop_eleft))
+                out2_all = self._net(take_per_row(x, crop_offset + crop_left, crop_eright - crop_left))
+
+                out1 = out1_all[:, -crop_l:]
+                out2 = out2_all[:, :crop_l]
+
+                loss = hier_CL_soft(
+                    out1,
+                    out2,
+                    soft_labels_batch,
+                    lambda_=self.lambda_,
+                    tau_temp=self.tau_temp,
+                    temporal_unit=self.temporal_unit,
+                    soft_temporal=self.soft_temporal,
+                    soft_instance=self.soft_instance,
+                )
+                cum_loss += float(loss.item())
+                n_iters += 1
+
+        # 还原训练模式
+        self._net.train(org_train_mode_net)
+        if n_iters == 0:
+            return None
+        return cum_loss / n_iters
+
+    def fit(self, train_data, train_labels, test_data, test_labels, soft_labels, run_dir, n_epochs=None, n_iters=None, verbose=False, valid_data=None, test_data_eval=None):
         """
         训练TS2Vec模型
         
@@ -211,6 +307,11 @@ class TS2Vec:
                 x = x.to(self.device)
 
                 x = x.reshape(x.shape[0], x.shape[2], -1)
+                # norm
+                if self.revin: 
+                    x = x.permute(0,2,1)
+                    x = self.revin_layer(x, 'norm')
+                    x = x.permute(0,2,1)
                 if self.padding_patch == "end":
                     x = self.padding_patch_layer(x)
                 x = x.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride) # (B, C, N, P)
@@ -284,8 +385,16 @@ class TS2Vec:
             # 计算并记录epoch平均损失
             cum_loss /= n_epoch_iters
             loss_log.append(cum_loss)
+            # 额外评估：valid/test（只读，无梯度）
+            val_loss = self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
+            tst_loss = self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
             if verbose:
-                print(f"Epoch #{self.n_epochs}: loss={cum_loss}")
+                msg = f"Epoch #{self.n_epochs}: train_loss={cum_loss}"
+                if val_loss is not None:
+                    msg += f" valid_loss={val_loss}"
+                if tst_loss is not None:
+                    msg += f" test_loss={tst_loss}"
+                print(msg)
             
             # 注释掉的在线评估代码（可选功能）
             # 在训练过程中可以实时评估模型在分类任务上的性能

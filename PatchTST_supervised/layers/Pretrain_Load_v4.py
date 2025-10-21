@@ -12,7 +12,7 @@ def load_pretrained_model(configs):
     model_dir = os.path.join("/home/wms/South/DCLT/checkpoints/", f"{data_name}/")
 
     model, cfg = find_model(model_dir, 'pkl')
-    model = init_state_of_model(model, model_state)
+    # model = init_state_of_model(model, model_state)
     # 校验参数
     check_prams(configs, cfg)
     return model.net
@@ -47,6 +47,7 @@ def find_model(model_dir, load_mode='pkl'):
         
         # 选择best的
         ckpt_path = os.path.join(model_dir, f"best.pkl")
+        print(f"加载预训练模型: {ckpt_path}")
         if cfg.patch_cl_ver == 1:
             from cl_models_v4.PCLE_Model_ver1 import TS2Vec
             model = TS2Vec(
@@ -60,17 +61,17 @@ def find_model(model_dir, load_mode='pkl'):
 
         return model, cfg
 
-def init_state_of_model(model, model_state='reason'):
-    if model_state == 'reason':
-        model.net.eval()
-        for param in model.net.parameters():
-            param.requires_grad = False
-    elif model_state == 'finetune':
-        pass
-    else:
-        raise ValueError(f"未知的 model_state: {model_state}")
+# def init_state_of_model(model, model_state='reason'):
+#     if model_state == 'reason':
+#         model.net.eval()
+#         for param in model.net.parameters():
+#             param.requires_grad = False
+#     elif model_state == 'finetune':
+#         pass
+#     else:
+#         raise ValueError(f"未知的 model_state: {model_state}")
 
-    return model
+#     return model
 
 def check_prams(configs, cfg):
     if configs.patch_len != cfg.patch_len:

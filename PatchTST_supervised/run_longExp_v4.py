@@ -113,7 +113,7 @@ parser.add_argument('--test_flop', action='store_true', default=False, help='See
 
 # v3版本的cl模型
 parser.add_argument('--use_pretrained_cl', type=bool, default=True, help='whether to use pretrained cl model; True 1 False 0')
-parser.add_argument('--enable_cross_attn', type=bool, default=True, help='whether to use cross-attention; True 1 False 0')
+parser.add_argument('--enable_cross_attn', type=bool, default=False, help='whether to use cross-attention; True 1 False 0')
 
 # v4版本没有加新的参数
 parser.add_argument('--load_mode', type=str, default='pkl', help='load mode, ckpt or onnx')
