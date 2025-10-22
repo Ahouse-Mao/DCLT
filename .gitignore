@@ -13,3 +13,6 @@ lightning_logs/
 *.log
 
 *.png
+/logs
+/test_results
+results_forecast_csv/

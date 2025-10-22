@@ -45,8 +45,9 @@ class _CheckpointManager:
         self.save_every = max(1, int(save_every)) if save_every is not None else 1
         self.best_loss = float('inf')
         self.best_epoch = -1
+        self.log_path = os.path.join(self.ckpt_dir, 'train_log.csv')
 
-    def __call__(self, model, loss: float):
+    def __call__(self, model, loss):
         epoch = getattr(model, 'n_epochs', None)
         if epoch is None:
             # 兜底：没有 epoch 计数则不保存
@@ -56,12 +57,41 @@ class _CheckpointManager:
         latest_path = os.path.join(self.ckpt_dir, 'latest.pkl')
         model.save(latest_path)
 
+        # 解析可能的 payload（支持 float 或 dict）
+        metric_for_best = None
+        train_loss = None
+        valid_loss = None
+        test_loss = None
+        if isinstance(loss, dict):
+            train_loss = loss.get('train_loss')
+            valid_loss = loss.get('valid_loss')
+            test_loss = loss.get('test_loss')
+            # 保持与原先行为一致：用 train_loss 选 best（若想用 valid，可切换为 valid_loss）
+            metric_for_best = train_loss if train_loss is not None else valid_loss
+        else:
+            metric_for_best = float(loss) if loss is not None else None
+            train_loss = metric_for_best
+
         # 最优
-        if loss is not None and loss < self.best_loss:
-            self.best_loss = float(loss)
+        if metric_for_best is not None and metric_for_best < self.best_loss:
+            self.best_loss = float(metric_for_best)
             self.best_epoch = int(epoch)
             best_path = os.path.join(self.ckpt_dir, 'best.pkl')
             model.save(best_path)
+
+        # 记录日志到 CSV
+        try:
+            header_needed = not os.path.exists(self.log_path)
+            with open(self.log_path, 'a', encoding='utf-8') as f:
+                if header_needed:
+                    f.write('epoch,train_loss,valid_loss,test_loss,timestamp\n')
+                ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                tr = '' if train_loss is None else f"{train_loss}"
+                va = '' if valid_loss is None else f"{valid_loss}"
+                te = '' if test_loss is None else f"{test_loss}"
+                f.write(f"{epoch},{tr},{va},{te},{ts}\n")
+        except Exception as e:
+            print(f"[warn] failed to write log CSV: {e}")
 
 def _to_builtin(obj: Any) -> Any:
     """将 argparse.Namespace / numpy 类型 转为可 YAML/JSON 序列化的基础类型。"""
@@ -128,12 +158,12 @@ if __name__ == '__main__':
     parser.add_argument('--loader', type=str, default="forecast_csv", help='The data loader used to load the experimental data. This can be set to UCR, UEA, forecast_csv, forecast_csv_univar, anomaly, or anomaly_coldstart')
     parser.add_argument('--dist_type', type=str, default='DTW')
     parser.add_argument('--gpu', type=int, default=0, help='The gpu no. used for training and inference (defaults to 0)')
-    parser.add_argument('--batch-size', type=int, default=24, help='The batch size (defaults to 8)')
+    parser.add_argument('--batch-size', type=int, default=16, help='The batch size (defaults to 8)')
     parser.add_argument('--lr', type=float, default=0.001, help='The learning rate (defaults to 0.001)')
     parser.add_argument('--repr-dims', type=int, default=256, help='The representation dimension (defaults to 320)')
-    parser.add_argument('--max-train-length', type=int, default=500, help='For sequence with a length greater than <max_train_length>, it would be cropped into some sequences, each of which has a length less than <max_train_length> (defaults to 3000)')
+    parser.add_argument('--max-train-length', type=int, default=336, help='For sequence with a length greater than <max_train_length>, it would be cropped into some sequences, each of which has a length less than <max_train_length> (defaults to 3000)')
     parser.add_argument('--iters', type=int, default=None, help='The number of iterations')
-    parser.add_argument('--epochs', type=int, default=300, help='The number of epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='The number of epochs')
     parser.add_argument('--save-every', type=int, default=None, help='Save the checkpoint every <save_every> iterations/epochs')
     parser.add_argument('--seed', type=int, default=None, help='The random seed')
     parser.add_argument('--eval', type=bool, default=False, help='Whether to perform evaluation after training')
@@ -152,6 +182,8 @@ if __name__ == '__main__':
     parser.add_argument('--patch_stride', type=int, default=2, help='The stride between patches when using patch-level contrastive learning')
     parser.add_argument('--depth', type=int, default=8, help='The depth of the model when using patch-level contrastive learning')
     parser.add_argument('--revin', type=int, default=1, help='RevIN; True 1 False 0')
+    parser.add_argument('--eval_mode', type=str, default='Linear', help='The evaluation mode after training, Linear, Traditional')
+    parser.add_argument('--TS', type=str, default=None, help='Timestamp')
     args = parser.parse_args()
 
     args = init_n_vars(args) # 根据数据集名称初始化 n_vars 参数
@@ -181,10 +213,53 @@ if __name__ == '__main__':
 
     # =============== Checkpoints 目录（根据用户要求） ===============
     # ./checkpoints/{dataset}/{patch_len}-{repr-dims}v4{时间戳}/
-    timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-    ckpt_sub = f"{args.patch_len}-{args.repr_dims}_v4_{timestamp}"
+    timestamp = args.TS
+    ckpt_sub = f"{timestamp}_{args.epochs}_{args.patch_len}_{args.patch_stride}_{args.max_train_length}_{args.repr_dims}"
     ckpt_dir = os.path.join('.', 'checkpoints', args.dataset, ckpt_sub)
     os.makedirs(ckpt_dir, exist_ok=True)
+    # 将终端输出同时记录到 checkpoints 下的 run.log 文件（追加模式）
+    import atexit
+
+    log_file_path = os.path.join(ckpt_dir, 'run.log')
+    try:
+        _log_f = open(log_file_path, 'a', encoding='utf-8')
+    except Exception:
+        _log_f = None
+
+    class Tee(object):
+        def __init__(self, *streams):
+            self.streams = streams
+        def write(self, data):
+            for s in self.streams:
+                try:
+                    s.write(data)
+                except Exception:
+                    pass
+        def flush(self):
+            for s in self.streams:
+                try:
+                    s.flush()
+                except Exception:
+                    pass
+
+    if _log_f is not None:
+        sys.stdout = Tee(sys.stdout, _log_f)
+        sys.stderr = Tee(sys.stderr, _log_f)
+        atexit.register(lambda: _log_f.close())
+        # 立即把关键信息写入日志文件（有些早期打印可能发生在 Tee 安装之前）
+        try:
+            _log_f.write('----- RUN HEADER -----\n')
+            _log_f.write(f'Timestamp: {timestamp}\n')
+            try:
+                _log_f.write(f'Dataset: {args.dataset}\n')
+                _log_f.write(f'Arguments: {str(args)}\n')
+            except Exception:
+                # args 可能尚未完全可用，忽略写入错误
+                pass
+            _log_f.write('----------------------\n')
+            _log_f.flush()
+        except Exception as e:
+            print(f"[warn] failed to write header into run.log: {e}")
     
     # file_exists = os.path.join(run_dir,f'eval_res_{args.dist_type}.pkl')
         
@@ -408,7 +483,41 @@ if __name__ == '__main__':
     if args.eval:
         if args.use_patch_cl:
             if args.patch_cl_ver == 1:
-                out, eval_res = tasks_v4.eval_forecasting_patch(model, data, train_slice, valid_slice, test_slice, scaler, pred_lens, n_covariate_cols)
+                if args.eval_mode == 'Traditional':
+                    out, eval_res = tasks_v4.eval_forecasting_patch(model, data, train_slice, valid_slice, test_slice, scaler, pred_lens, n_covariate_cols)
+                # elif args.eval_mode == 'Linear':
+                #     # 线性预测探测器：冻结 TS2Vec，仅训练线性层
+                #     try:
+                #         seq_len = int(args.max_train_length)
+                #     except Exception:
+                #         seq_len = 96
+                #     label_len = max(1, min(48, seq_len // 2))
+                #     linear_logs = tasks_v4.linear_forecast_probe(
+                #         model,
+                #         dataset_name=args.dataset,
+                #         pred_lens=[96, 192, 336, 720],
+                #         seq_len=seq_len,
+                #         label_len=label_len,
+                #         patch_len=args.patch_len,
+                #         patch_stride=args.patch_stride,
+                #         padding_patch='end',
+                #         use_revin=bool(args.revin),
+                #         device=device,
+                #         root_path='./dataset/',
+                #         batch_size=128,
+                #         epochs=1,
+                #         num_workers=4,
+                #         features='M',
+                #         target='OT',
+                #         freq='h'
+                #     )
+                #     eval_res = {'linear_probe': linear_logs}
+                #     # 保存线性探测日志到 checkpoints 目录
+                #     try:
+                #         _save_yaml_safe(os.path.join(ckpt_dir, 'linear_probe_logs.yaml'), linear_logs)
+                #     except Exception as e:
+                #         print(f"[warn] failed to write linear probe logs: {e}")
+
         else:
             if task_type == 'classification':
                 out, eval_res = tasks_v4.eval_classification(model, train_data, train_labels, test_data, test_labels, eval_protocol='svm')

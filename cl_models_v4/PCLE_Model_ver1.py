@@ -103,7 +103,7 @@ class TS2Vec:
         
         # 指数移动平均网络：用于稳定训练和推理
         # SWA (Stochastic Weight Averaging) 提供更平滑的模型权重
-        self.net = torch.optim.swa_utils.AveragedModel(self._net)
+        self.net = torch.optim.swa_utils.AveragedModel(self._net).to(self.device)
         self.net.update_parameters(self._net)
         
         # 回调函数
@@ -436,9 +436,16 @@ class TS2Vec:
             
             # 更新epoch计数器
             self.n_epochs += 1
-            # 执行epoch后回调
+            # 执行epoch后回调（传递完整的损失信息，便于记录日志与挑选best）
             if self.after_epoch_callback is not None:
-                self.after_epoch_callback(self, cum_loss)
+                loss_payload = {
+                    'train_loss': float(cum_loss)
+                }
+                if val_loss is not None:
+                    loss_payload['valid_loss'] = float(val_loss)
+                if tst_loss is not None:
+                    loss_payload['test_loss'] = float(tst_loss)
+                self.after_epoch_callback(self, loss_payload)
             
         return loss_log
     
