@@ -237,7 +237,7 @@ class custom_dataset(Dataset):
     self.X = X
 
   def __len__(self): 
-    return len(self.X)
+    return self.X.shape[0]
 
   def __getitem__(self, idx): 
     X = torch.FloatTensor(self.X[idx])

@@ -103,8 +103,8 @@ class TS2Vec:
         
         # 指数移动平均网络：用于稳定训练和推理
         # SWA (Stochastic Weight Averaging) 提供更平滑的模型权重
-        self.net = torch.optim.swa_utils.AveragedModel(self._net).to(self.device)
-        self.net.update_parameters(self._net)
+        # self.net = torch.optim.swa_utils.AveragedModel(self._net).to(self.device)
+        # self.net.update_parameters(self._net)
         
         # 回调函数
         self.after_iter_callback = after_iter_callback
@@ -140,28 +140,52 @@ class TS2Vec:
             return None
         assert data.ndim == 3
 
-        # 复制并应用与训练相同的预处理
+        # ================ 与 fit 完全一致的数据预处理 ================
+        # 1. 处理过长序列：使用滑动窗口切分，不需要填充
         eval_data = data
         if self.max_train_length is not None and eval_data.shape[1] > self.max_train_length:
-            # 使用滑动窗口切分，不填充
+            # 计算可以切分的完整段数
             n_samples, seq_len, n_features = eval_data.shape
             n_segments = seq_len // self.max_train_length
             
             if n_segments >= 2:
+                # 只取完整的段，不填充
                 segments_list = []
                 for i in range(n_segments):
                     start_idx = i * self.max_train_length
                     end_idx = start_idx + self.max_train_length
                     segments_list.append(eval_data[:, start_idx:end_idx, :])
+                
+                # 拼接所有段：(n_samples*n_segments, max_train_length, n_features)
                 eval_data = np.concatenate(segments_list, axis=0)
-
-        temporal_missing = np.isnan(eval_data).all(axis=-1).any(axis=0)
-        if temporal_missing[0] or temporal_missing[-1]:
-            eval_data = centerize_vary_length_series(eval_data)
-
-        eval_data = eval_data[~np.isnan(eval_data).all(axis=2).all(axis=1)]
-
-        dataset = custom_dataset(eval_data)
+        
+        # 2. 按照 patch_len 和 patch_stride 切分整个数据集为 patch 表示
+        # 将数据转换为 torch tensor
+        eval_data_tensor = torch.FloatTensor(eval_data).to(self.device)  # (B, T, C)
+        
+        # 重塑为 (B, C, T)
+        eval_data_tensor = eval_data_tensor.permute(0, 2, 1)
+        
+        # RevIN 归一化
+        if self.revin:
+            eval_data_tensor = eval_data_tensor.permute(0, 2, 1)  # (B, T, C)
+            eval_data_tensor = self.revin_layer(eval_data_tensor, 'norm')
+            eval_data_tensor = eval_data_tensor.permute(0, 2, 1)  # (B, C, T)
+        
+        # Padding
+        if self.padding_patch == "end":
+            eval_data_tensor = self.padding_patch_layer(eval_data_tensor)
+        
+        # 使用 unfold 切分为 patch: (B, C, N, P)
+        # N = patch 数量, P = patch_len
+        eval_data_tensor = eval_data_tensor.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)
+        B, C, N, P = eval_data_tensor.shape
+        
+        # 转回 CPU numpy 用于 DataLoader
+        eval_data_patched = eval_data_tensor.cpu().numpy()
+        
+        # 创建数据加载器 - 使用已经 patch 化的数据
+        dataset = custom_dataset(eval_data_patched)
         loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False, drop_last=False)
 
         org_train_mode_net = self._net.training
@@ -177,22 +201,11 @@ class TS2Vec:
                 else:
                     soft_labels_batch = soft_labels[idx][:, idx]
 
-                # 长序列随机裁剪与预处理
-                if self.max_train_length is not None and x.size(1) > self.max_train_length:
-                    window_offset = np.random.randint(x.size(1) - self.max_train_length + 1)
-                    x = x[:, window_offset: window_offset + self.max_train_length]
+                # x 已经是 patch 化后的数据: (batch, C, N, P)
+                # 其中 N 是 patch 数量, P 是 patch 长度
                 x = x.to(self.device)
-
-                x = x.reshape(x.shape[0], x.shape[2], -1)
-                if self.revin:
-                    x = x.permute(0, 2, 1)
-                    x = self.revin_layer(x, 'norm')
-                    x = x.permute(0, 2, 1)
-                if self.padding_patch == 'end':
-                    x = self.padding_patch_layer(x)
-                x = x.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)  # (B, C, N, P)
-                B, C, N, P = x.shape
-                x = x.reshape(B * C, N, P)
+                x = x.reshape(-1, x.shape[2], x.shape[3])
+                x = x.contiguous()
 
                 ts_l = x.size(1)
                 crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=ts_l + 1)
@@ -332,6 +345,7 @@ class TS2Vec:
             n_epoch_iters = 0   # 当前epoch的迭代数
             
             interrupted = False
+            self._net.train()
             for x, idx in train_loader:
                 
                 # 检查是否达到指定的迭代数
@@ -347,11 +361,12 @@ class TS2Vec:
                     # 提取当前批次样本间的相似性子矩阵
                     soft_labels_batch = soft_labels[idx][:,idx]
        
-                # x 已经是 patch 化后的数据: (batch, N, P)
+                # x 已经是 patch 化后的数据: (batch, C, N, P)
                 # 其中 N 是 patch 数量, P 是 patch 长度
                 x = x.to(self.device)
                 B, C, N, P = x.shape
                 x = x.reshape(B * C, N, P)
+                x = x.contiguous()
                 
                 # ================ 关键：随机裁剪策略 ================
                 # 这是TS2Vec的核心思想：从时间序列中裁剪两个重叠的子序列进行对比学习
@@ -402,7 +417,7 @@ class TS2Vec:
                 loss.backward()
                 optimizer.step()
                 # 更新指数移动平均模型
-                self.net.update_parameters(self._net)
+                # self.net.update_parameters(self._net)
                     
                 # 更新训练统计
                 cum_loss += loss.item()
@@ -421,8 +436,8 @@ class TS2Vec:
             cum_loss /= n_epoch_iters
             loss_log.append(cum_loss)
             # 额外评估：valid/test（只读，无梯度）
-            val_loss = self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
-            tst_loss = self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
+            val_loss = None# self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
+            tst_loss = None# self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
             if verbose:
                 msg = f"Epoch #{self.n_epochs}: train_loss={cum_loss}"
                 if val_loss is not None:
@@ -501,7 +516,7 @@ class TS2Vec:
         Args:
             fn (str): 保存文件的路径
         """
-        torch.save(self.net.state_dict(), fn)
+        torch.save(self._net.state_dict(), fn)
     
     def load(self, fn):
         """
@@ -511,5 +526,5 @@ class TS2Vec:
             fn (str): 模型文件的路径
         """
         state_dict = torch.load(fn, map_location=self.device)
-        self.net.load_state_dict(state_dict)
+        self._net.load_state_dict(state_dict)
     

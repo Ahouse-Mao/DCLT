@@ -161,28 +161,7 @@ class TS2Vec:
 
         eval_data = eval_data[~np.isnan(eval_data).all(axis=2).all(axis=1)]
 
-        # 与 fit() 保持一致的 patch 化流程：tensor -> (B,C,T) -> RevIN(norm) -> padding -> unfold -> reshape (B*C, N, P)
-        eval_tensor = torch.FloatTensor(eval_data).to(self.device)  # (B, T, C)
-        eval_tensor = eval_tensor.permute(0, 2, 1)  # (B, C, T)
-
-        if self.revin:
-            # RevIN 在 fit 中是对 (B, T, C) 做 norm，然后再转回 (B, C, T)
-            eval_tensor = eval_tensor.permute(0, 2, 1)  # (B, T, C)
-            eval_tensor = self.revin_layer(eval_tensor, 'norm')
-            eval_tensor = eval_tensor.permute(0, 2, 1)  # (B, C, T)
-
-        if self.padding_patch == "end":
-            eval_tensor = self.padding_patch_layer(eval_tensor)
-
-        # 切分为 patch: (B, C, N, P)
-        eval_tensor = eval_tensor.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)
-        B, C, N, P = eval_tensor.shape
-
-        # 合并 B 和 C -> (B*C, N, P)
-        eval_tensor = eval_tensor.reshape(B * C, N, P)
-        eval_patched = eval_tensor.cpu().numpy()
-
-        dataset = custom_dataset(eval_patched)
+        dataset = custom_dataset(eval_data)
         loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False, drop_last=False)
 
         org_train_mode_net = self._net.training
@@ -198,8 +177,23 @@ class TS2Vec:
                 else:
                     soft_labels_batch = soft_labels[idx][:, idx]
 
-                # x 已经在外部被 patch 化为 (batch, N, P)
+                # 长序列随机裁剪与预处理
+                if self.max_train_length is not None and x.size(1) > self.max_train_length:
+                    window_offset = np.random.randint(x.size(1) - self.max_train_length + 1)
+                    x = x[:, window_offset: window_offset + self.max_train_length]
                 x = x.to(self.device)
+
+                x = x.reshape(x.shape[0], x.shape[2], -1)
+                if self.revin:
+                    x = x.permute(0, 2, 1)
+                    x = self.revin_layer(x, 'norm')
+                    x = x.permute(0, 2, 1)
+                if self.padding_patch == 'end':
+                    x = self.padding_patch_layer(x)
+                x = x.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)  # (B, C, N, P)
+                B, C, N, P = x.shape
+                x = x.reshape(B * C, N, P)
+
                 ts_l = x.size(1)
                 crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=ts_l + 1)
                 crop_left = np.random.randint(ts_l - crop_l + 1)
@@ -312,8 +306,8 @@ class TS2Vec:
         train_data_tensor = train_data_tensor.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)
         B, C, N, P = train_data_tensor.shape
         
-        # # 重塑为 (B*C, N, P) - 将 C 和 B 合并
-        # train_data_tensor = train_data_tensor.reshape(B*C, N, P)
+        # 重塑为 (B*C, N, P) - 将 C 和 B 合并
+        train_data_tensor = train_data_tensor.reshape(B*C, N, P)
         
         # 转回 CPU numpy 用于 DataLoader
         train_data_patched = train_data_tensor.cpu().numpy()
@@ -339,8 +333,7 @@ class TS2Vec:
             
             interrupted = False
             for x, idx in train_loader:
-                x = x.contiguous()
-                x = x.reshape(-1, x.shape[2], x.shape[3])  # (B*C, N, P)
+                
                 # 检查是否达到指定的迭代数
                 if n_iters is not None and self.n_iters >= n_iters:
                     interrupted = True
@@ -426,8 +419,8 @@ class TS2Vec:
             cum_loss /= n_epoch_iters
             loss_log.append(cum_loss)
             # 额外评估：valid/test（只读，无梯度）
-            val_loss = None#self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
-            tst_loss = None#self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
+            val_loss = self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
+            tst_loss = self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
             if verbose:
                 msg = f"Epoch #{self.n_epochs}: train_loss={cum_loss}"
                 if val_loss is not None:
