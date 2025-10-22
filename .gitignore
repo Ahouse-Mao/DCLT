@@ -16,3 +16,4 @@ lightning_logs/
 /logs
 /test_results
 results_forecast_csv/
+logs_forecast_csv/
