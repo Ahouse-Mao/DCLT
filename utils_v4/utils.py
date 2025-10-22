@@ -25,17 +25,41 @@ def torch_pad_nan(arr, left=0, right=0, dim=0):
         arr = torch.cat((arr, torch.full(padshape, np.nan)), dim=dim)
     return arr
     
-def pad_nan_to_target(array, target_length, axis=0, both_side=False):
+def pad_nan_to_target(array, target_length, axis=0, both_side=True):
     assert array.dtype in [np.float16, np.float32, np.float64]
     pad_size = target_length - array.shape[axis]
     if pad_size <= 0:
         return array
-    npad = [(0, 0)] * array.ndim
+    
     if both_side:
-        npad[axis] = (pad_size // 2, pad_size - pad_size//2)
+        left_pad_size = pad_size // 2
+        right_pad_size = pad_size - left_pad_size
     else:
-        npad[axis] = (0, pad_size)
-    return np.pad(array, pad_width=npad, mode='constant', constant_values=np.nan)
+        left_pad_size = 0
+        right_pad_size = pad_size
+    
+    # 获取左边界和右边界的值用于填充
+    left_slice = [slice(None)] * array.ndim
+    left_slice[axis] = slice(0, 1)
+    left_value = array[tuple(left_slice)]
+    
+    right_slice = [slice(None)] * array.ndim
+    right_slice[axis] = slice(-1, None)
+    right_value = array[tuple(right_slice)]
+    
+    # 创建左右填充数组
+    parts = []
+    if left_pad_size > 0:
+        left_pad = np.repeat(left_value, left_pad_size, axis=axis)
+        parts.append(left_pad)
+    
+    parts.append(array)
+    
+    if right_pad_size > 0:
+        right_pad = np.repeat(right_value, right_pad_size, axis=axis)
+        parts.append(right_pad)
+    
+    return np.concatenate(parts, axis=axis)
 
 def split_with_nan(x, sections, axis=0):
     assert x.dtype in [np.float16, np.float32, np.float64]
@@ -139,6 +163,61 @@ class custom_dataset(Dataset):
     return X, idx
 
 
+class sliding_window_dataset(Dataset):
+    """
+    滑动窗口数据集，用于将长序列数据切分为固定长度的窗口
+    支持重复区间的切分
+    
+    输入数据格式: (1, L, C) 或 (L, C)
+    输出数据格式: (B, C, L) 其中 B 是窗口数量，L 是窗口长度
+    
+    Args:
+        data: numpy array 或 torch tensor, 形状为 (1, L, C) 或 (L, C)
+        window_length: 每个窗口的长度
+        stride: 滑动窗口的步长，默认等于 window_length（无重叠）
+    """
+    def __init__(self, data, window_length, stride=None):
+        # 处理输入数据格式
+        if data.ndim == 3 and data.shape[0] == 1:
+            # (1, L, C) -> (L, C)
+            data = data.squeeze(0)
+        elif data.ndim != 2:
+            raise ValueError(f"Expected data shape (1, L, C) or (L, C), got {data.shape}")
+        
+        self.data = data  # (L, C)
+        self.window_length = window_length
+        self.stride = stride if stride is not None else window_length
+        
+        # 计算可以生成多少个窗口
+        seq_len = data.shape[0]
+        self.num_windows = (seq_len - window_length) // self.stride + 1
+        
+        if self.num_windows <= 0:
+            raise ValueError(f"Sequence length {seq_len} is too short for window length {window_length}")
+    
+    def __len__(self):
+        return self.num_windows
+    
+    def __getitem__(self, idx):
+        """
+        返回一个窗口的数据
+        
+        Returns:
+            X: torch.FloatTensor, 形状为 (C, L)
+            idx: int, 窗口索引
+        """
+        start_idx = idx * self.stride
+        end_idx = start_idx + self.window_length
+        
+        # 提取窗口数据: (L, C) -> (window_length, C)
+        window_data = self.data[start_idx:end_idx, :]
+        
+        # 转置为 (C, L) 
+        X = window_data.T  # (C, window_length)
+        
+        return X, idx
+
+
 
 """
 This module is used to show the shape of params when debugging.
@@ -152,3 +231,45 @@ def custom_repr(self):
 
 def show_shape():
     torch.Tensor.__repr__ = custom_repr
+
+class custom_dataset(Dataset): 
+  def __init__(self, X):
+    self.X = X
+
+  def __len__(self): 
+    return len(self.X)
+
+  def __getitem__(self, idx): 
+    X = torch.FloatTensor(self.X[idx])
+    return X, idx
+  
+  # ...existing code...
+def get_a_vector(A, indx, num_elem):
+    """
+    Torch-only 实现：
+    - A: torch.Tensor, shape (B, T, ...)
+    - indx: array-like torch tensor, shape (B,)
+    - num_elem: int, 每行要取的连续元素个数
+    返回: torch.Tensor, shape (B, num_elem, ...)
+    会在索引越界时抛 IndexError。
+    """
+    if not torch.is_tensor(A):
+        raise TypeError("A must be a torch.Tensor")
+
+    B = A.shape[0]
+    T = A.shape[1]
+    indx=indx.to(A.device)
+
+    # 边界检查：确保所有需要的索引都在 [0, T-1] 内
+    min_idx = int(indx.min().item())
+    max_needed = int((indx + (num_elem - 1)).max().item())
+    if min_idx < 0 or max_needed >= T:
+        raise IndexError(f"Requested windows exceed time dimension: "
+                         f"A.shape[1]={T}, required max index={max_needed}, min index={min_idx}")
+
+    # 构造索引并选取
+    ar = torch.arange(num_elem, device=A.device).unsqueeze(0)     # 1 x num_elem
+    all_indx = indx.unsqueeze(1) + ar                          # B x num_elem
+    rows = torch.arange(B, device=A.device).unsqueeze(1)         # B x 1 -> broadcast
+    return A[rows, all_indx]
+# ...existing code...

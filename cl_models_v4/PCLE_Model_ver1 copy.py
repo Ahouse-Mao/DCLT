@@ -140,10 +140,29 @@ class TS2Vec:
             return None
         assert data.ndim == 3
 
-        # 使用与训练相同的 sliding_window_dataset
-        eval_dataset = sliding_window_dataset(data=data, window_length=self.max_train_length)
-        eval_loader = DataLoader(eval_dataset, batch_size=min(self.batch_size, len(eval_dataset)), 
-                                 shuffle=False, drop_last=False)
+        # 复制并应用与训练相同的预处理
+        eval_data = data
+        if self.max_train_length is not None and eval_data.shape[1] > self.max_train_length:
+            # 使用滑动窗口切分，不填充
+            n_samples, seq_len, n_features = eval_data.shape
+            n_segments = seq_len // self.max_train_length
+            
+            if n_segments >= 2:
+                segments_list = []
+                for i in range(n_segments):
+                    start_idx = i * self.max_train_length
+                    end_idx = start_idx + self.max_train_length
+                    segments_list.append(eval_data[:, start_idx:end_idx, :])
+                eval_data = np.concatenate(segments_list, axis=0)
+
+        temporal_missing = np.isnan(eval_data).all(axis=-1).any(axis=0)
+        if temporal_missing[0] or temporal_missing[-1]:
+            eval_data = centerize_vary_length_series(eval_data)
+
+        eval_data = eval_data[~np.isnan(eval_data).all(axis=2).all(axis=1)]
+
+        dataset = custom_dataset(eval_data)
+        loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False, drop_last=False)
 
         org_train_mode_net = self._net.training
         self._net.eval()
@@ -151,59 +170,44 @@ class TS2Vec:
         cum_loss = 0.0
         n_iters = 0
         with torch.no_grad():
-            for x, idx in eval_loader:
-                # 移动到GPU（只做一次）- 与 fit 统一
-                x = x.float().to(self.device)
-                # 确保内存连续
-                x = x.contiguous()
-                
+            for x, idx in loader:
                 # 软标签子矩阵
                 if soft_labels is None:
                     soft_labels_batch = None
                 else:
                     soft_labels_batch = soft_labels[idx][:, idx]
 
-                # RevIN 归一化 - 与 fit 统一
+                # 长序列随机裁剪与预处理
+                if self.max_train_length is not None and x.size(1) > self.max_train_length:
+                    window_offset = np.random.randint(x.size(1) - self.max_train_length + 1)
+                    x = x[:, window_offset: window_offset + self.max_train_length]
+                x = x.to(self.device)
+
+                x = x.reshape(x.shape[0], x.shape[2], -1)
                 if self.revin:
                     x = x.permute(0, 2, 1)
                     x = self.revin_layer(x, 'norm')
                     x = x.permute(0, 2, 1)
-
-                # do patching - 与 fit 统一
                 if self.padding_patch == 'end':
                     x = self.padding_patch_layer(x)
-                x = x.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)
+                x = x.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)  # (B, C, N, P)
                 B, C, N, P = x.shape
-                
-                # 重塑为 (B*C, N, P) - 与 fit 统一
-                x = x.reshape(B*C, N, P)
-                
-                # ================ 随机裁剪策略 - 与 fit 统一 ================
+                x = x.reshape(B * C, N, P)
+
                 ts_l = x.size(1)
-                
-                # 1. 随机确定重叠区域的长度（crop_l）
                 crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=ts_l + 1)
-                
-                # 2. 随机确定重叠区域在原序列中的位置
-                crop_left = np.random.randint(low=0, high=ts_l - crop_l + 1)
+                crop_left = np.random.randint(ts_l - crop_l + 1)
                 crop_right = crop_left + crop_l
-                
-                # 3. 为两个子序列随机扩展边界
                 crop_eleft = np.random.randint(crop_left + 1)
                 crop_eright = np.random.randint(low=crop_right, high=ts_l + 1)
-                
-                # 4. 为每个样本生成随机偏移
                 crop_offset = np.random.randint(low=-crop_eleft, high=ts_l - crop_eright + 1, size=x.size(0))
 
-                # 编码两个子序列
                 out1_all = self._net(take_per_row(x, crop_offset + crop_eleft, crop_right - crop_eleft))
                 out2_all = self._net(take_per_row(x, crop_offset + crop_left, crop_eright - crop_left))
 
-                # 提取重叠部分
                 out1 = out1_all[:, -crop_l:]
                 out2 = out2_all[:, :crop_l]
 
-                # 计算损失
                 loss = hier_CL_soft(
                     out1,
                     out2,
@@ -254,11 +258,65 @@ class TS2Vec:
         if n_iters is None and n_epochs is None:
             n_iters = 200 if train_data.size <= 100000 else 600
         
-        train_dataset = sliding_window_dataset(data=train_data, window_length=self.max_train_length)
+        # ================ 数据预处理：滑动窗口切分 + Patch 化 ================
+        # 1. 处理过长序列：使用滑动窗口切分，不需要填充
+        if self.max_train_length is not None and train_data.shape[1] > self.max_train_length:
+            # 计算可以切分的完整段数
+            n_samples, seq_len, n_features = train_data.shape
+            n_segments = seq_len // self.max_train_length
+            
+            if n_segments >= 2:
+                # 只取完整的段，不填充
+                segments_list = []
+                for i in range(n_segments):
+                    start_idx = i * self.max_train_length
+                    end_idx = start_idx + self.max_train_length
+                    segments_list.append(train_data[:, start_idx:end_idx, :])
+                
+                # 拼接所有段：(n_samples*n_segments, max_train_length, n_features)
+                train_data = np.concatenate(segments_list, axis=0)
+        
+        # 2. 处理变长序列：将序列居中对齐
+        # temporal_missing = np.isnan(train_data).all(axis=-1).any(axis=0)
+        # if temporal_missing[0] or temporal_missing[-1]:
+        #     train_data = centerize_vary_length_series(train_data)
+        
+        # # 3. 移除完全为NaN的样本
+        # train_data = train_data[~np.isnan(train_data).all(axis=2).all(axis=1)]
+        
+        # 4. 按照 patch_len 和 patch_stride 切分整个数据集为 patch 表示
+        # 将数据转换为 torch tensor
+        train_data_tensor = torch.FloatTensor(train_data).to(self.device)  # (B, T, C)
+        
+        # 重塑为 (B, C, T)
+        train_data_tensor = train_data_tensor.permute(0, 2, 1)
+        
+        # RevIN 归一化
+        if self.revin:
+            train_data_tensor = train_data_tensor.permute(0, 2, 1)  # (B, T, C)
+            train_data_tensor = self.revin_layer(train_data_tensor, 'norm')
+            train_data_tensor = train_data_tensor.permute(0, 2, 1)  # (B, C, T)
+        
+        # Padding
+        if self.padding_patch == "end":
+            train_data_tensor = self.padding_patch_layer(train_data_tensor)
+        
+        # 使用 unfold 切分为 patch: (B, C, N, P)
+        # N = patch 数量, P = patch_len
+        train_data_tensor = train_data_tensor.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)
+        B, C, N, P = train_data_tensor.shape
+        
+        # # 重塑为 (B*C, N, P) - 将 C 和 B 合并
+        # train_data_tensor = train_data_tensor.reshape(B*C, N, P)
+        
+        # 转回 CPU numpy 用于 DataLoader
+        train_data_patched = train_data_tensor.cpu().numpy()
+        
+        # 创建数据加载器 - 使用已经 patch 化的数据
+        train_dataset = custom_dataset(train_data_patched)
         train_loader = DataLoader(train_dataset, batch_size=min(self.batch_size, len(train_dataset)), 
                                  shuffle=True, drop_last=True)
         
-
         # 初始化优化器
         optimizer = torch.optim.AdamW(self._net.parameters(), lr=self.lr)
         
@@ -275,12 +333,6 @@ class TS2Vec:
             
             interrupted = False
             for x, idx in train_loader:
-
-                # 移动到GPU（只做一次）
-                x = x.float().to(self.device)
-
-                # 确保内存连续
-                x = x.contiguous()
                 
                 # 检查是否达到指定的迭代数
                 if n_iters is not None and self.n_iters >= n_iters:
@@ -294,38 +346,30 @@ class TS2Vec:
                 else:
                     # 提取当前批次样本间的相似性子矩阵
                     soft_labels_batch = soft_labels[idx][:,idx]
-                
-                if self.revin:
-                    x = x.permute(0, 2, 1)
-                    x = self.revin_layer(x, 'norm')
-                    x = x.permute(0, 2, 1)
-
-                # do patching
-                if self.padding_patch == 'end':
-                    x = self.padding_patch_layer(x)
-                x = x.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)
+       
+                # x 已经是 patch 化后的数据: (batch, N, P)
+                # 其中 N 是 patch 数量, P 是 patch 长度
+                x = x.to(self.device)
                 B, C, N, P = x.shape
-
-                # 重塑为 (B*C, N, P) - 将 C 和 B 合并
-                x = x.reshape(B*C, N, P)
+                x = x.reshape(B * C, N, P)
                 
                 # ================ 关键：随机裁剪策略 ================
                 # 这是TS2Vec的核心思想：从时间序列中裁剪两个重叠的子序列进行对比学习
                 ts_l = x.size(1)  # patch 序列长度 (N)
                 
                 # 1. 随机确定重叠区域的长度（crop_l）
-                crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=ts_l + 1)
+                crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=ts_l+1)
                 
                 # 2. 随机确定重叠区域在原序列中的位置
-                crop_left = np.random.randint(low=0, high=ts_l - crop_l + 1)
+                crop_left = np.random.randint(ts_l - crop_l + 1)
                 crop_right = crop_left + crop_l
                 
                 # 3. 为两个子序列随机扩展边界
                 # 第一个子序列：从crop_eleft开始，到crop_right结束
-                crop_eleft = np.random.randint(crop_left + 1) # 扩展后的左边界
+                crop_eleft = np.random.randint(crop_left + 1)
                 # 第二个子序列：从crop_left开始，到crop_eright结束  
-                crop_eright = np.random.randint(low=crop_right, high=ts_l + 1) # 扩展后的右边界
-
+                crop_eright = np.random.randint(low=crop_right, high=ts_l + 1)
+                
                 # 4. 为每个样本生成随机偏移（支持并行处理）
                 crop_offset = np.random.randint(low=-crop_eleft, high=ts_l - crop_eright + 1, size=x.size(0))
                 
@@ -386,6 +430,44 @@ class TS2Vec:
                 if tst_loss is not None:
                     msg += f" test_loss={tst_loss}"
                 print(msg)
+            
+            # 注释掉的在线评估代码（可选功能）
+            # 在训练过程中可以实时评估模型在分类任务上的性能
+            '''
+            train_repr = self.encode(train_data, encoding_window='full_series' if train_labels.ndim == 1 else None)
+            test_repr = self.encode(test_data, encoding_window='full_series' if train_labels.ndim == 1 else None)
+            fit_svm = eval_protocols.fit_svm
+            fit_knn = eval_protocols.fit_knn
+
+            def merge_dim01(array):
+                return array.reshape(array.shape[0]*array.shape[1], *array.shape[2:])
+
+            if train_labels.ndim == 2:
+                train_repr = merge_dim01(train_repr)
+                train_labels = merge_dim01(train_labels)
+                test_repr = merge_dim01(test_repr)
+                test_labels = merge_dim01(test_labels)
+
+            clf = fit_knn(train_repr, train_labels)
+            acc = clf.score(test_repr, test_labels)
+            y_score = clf.predict_proba(test_repr)
+            test_labels_onehot = label_binarize(test_labels, classes=np.arange(train_labels.max()+1))
+            if test_labels_onehot.shape[1]==1:
+                test_labels_onehot = np.concatenate([np.ones((test_labels_onehot.shape[0],1))-test_labels_onehot,test_labels_onehot] ,axis=1)
+            
+            auprc = average_precision_score(test_labels_onehot, y_score)
+            
+            tb_logger.add_scalar('classification/acc_knn', acc, global_step = self.n_epochs)
+            tb_logger.add_scalar('classification/auprc_knn', auprc, global_step = self.n_epochs)
+        
+            clf = fit_svm(train_repr, train_labels)
+            acc = clf.score(test_repr, test_labels)
+            y_score = clf.decision_function(test_repr)
+            test_labels_onehot = label_binarize(test_labels, classes=np.arange(train_labels.max()+1))
+            auprc = average_precision_score(test_labels_onehot, y_score)
+            tb_logger.add_scalar('classification/acc_svm', acc, global_step = self.n_epochs)
+            tb_logger.add_scalar('classification/auprc_svm', auprc, global_step = self.n_epochs)
+            '''
             
             # 更新epoch计数器
             self.n_epochs += 1
