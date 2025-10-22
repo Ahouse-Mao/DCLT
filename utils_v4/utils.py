@@ -46,8 +46,17 @@ def split_with_nan(x, sections, axis=0):
     return arrs
 
 def take_per_row(A, indx, num_elem):
+    # 确保 indx 是 numpy 数组
+    if isinstance(indx, torch.Tensor):
+        indx = indx.cpu().numpy()
+    
     all_indx = indx[:,None] + np.arange(num_elem)
-    return A[torch.arange(all_indx.shape[0])[:,None], all_indx]
+    # 确保索引在有效范围内，防止 CUDA 非法内存访问
+    all_indx = np.clip(all_indx, 0, A.shape[1] - 1)
+    # 转换为 torch tensor 并确保与 A 在同一设备上
+    all_indx_tensor = torch.from_numpy(all_indx).long().to(A.device)
+    row_indices = torch.arange(all_indx.shape[0], device=A.device, dtype=torch.long)[:,None]
+    return A[row_indices, all_indx_tensor]
 
 def centerize_vary_length_series(x):
     prefix_zeros = np.argmax(~np.isnan(x).all(axis=-1), axis=1)

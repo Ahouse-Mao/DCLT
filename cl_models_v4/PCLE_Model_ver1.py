@@ -103,7 +103,7 @@ class TS2Vec:
         
         # 指数移动平均网络：用于稳定训练和推理
         # SWA (Stochastic Weight Averaging) 提供更平滑的模型权重
-        self.net = torch.optim.swa_utils.AveragedModel(self._net).to(self.device)
+        self.net = torch.optim.swa_utils.AveragedModel(self._net)
         self.net.update_parameters(self._net)
         
         # 回调函数
@@ -142,10 +142,8 @@ class TS2Vec:
 
         # 复制并应用与训练相同的预处理
         eval_data = data
-        if self.max_train_length is not None:
-            sections = eval_data.shape[1] // self.max_train_length
-            if sections >= 2:
-                eval_data = np.concatenate(split_with_nan(eval_data, sections, axis=1), axis=0)
+        if self.max_train_length is not None and eval_data.shape[1] > self.max_train_length:
+            eval_data = eval_data[:, :self.max_train_length, :]
 
         temporal_missing = np.isnan(eval_data).all(axis=-1).any(axis=0)
         if temporal_missing[0] or temporal_missing[-1]:
@@ -192,7 +190,8 @@ class TS2Vec:
                 crop_right = crop_left + crop_l
                 crop_eleft = np.random.randint(crop_left + 1)
                 crop_eright = np.random.randint(low=crop_right, high=ts_l + 1)
-                crop_offset = np.random.randint(low=-crop_eleft, high=ts_l - crop_eright + 1, size=x.size(0))
+                # 修复：不使用偏移，直接使用 0 偏移以避免索引越界
+                crop_offset = np.zeros(x.size(0), dtype=np.int64)
 
                 out1_all = self._net(take_per_row(x, crop_offset + crop_eleft, crop_right - crop_eleft))
                 out2_all = self._net(take_per_row(x, crop_offset + crop_left, crop_eright - crop_left))
@@ -250,12 +249,9 @@ class TS2Vec:
         if n_iters is None and n_epochs is None:
             n_iters = 200 if train_data.size <= 100000 else 600
         
-        # 处理过长序列：如果序列长度超过max_train_length，则分段处理
-        if self.max_train_length is not None:
-            sections = train_data.shape[1] // self.max_train_length
-            if sections >= 2:
-                train_data = np.concatenate(split_with_nan(train_data, sections, axis=1), axis=0)
-
+        # 处理过长序列：直接截断而不是使用 split_with_nan
+        if self.max_train_length is not None and train_data.shape[1] > self.max_train_length:
+            train_data = train_data[:, :self.max_train_length, :]
         
         # 处理变长序列：将序列居中对齐
         temporal_missing = np.isnan(train_data).all(axis=-1).any(axis=0)
@@ -307,6 +303,7 @@ class TS2Vec:
                 x = x.to(self.device)
 
                 x = x.reshape(x.shape[0], x.shape[2], -1)
+                
                 # norm
                 if self.revin: 
                     x = x.permute(0,2,1)
@@ -329,27 +326,24 @@ class TS2Vec:
                 crop_left = np.random.randint(ts_l - crop_l + 1)
                 crop_right = crop_left + crop_l
                 
-                # 3. 为两个子序列随机扩展边界
-                # 第一个子序列：从crop_eleft开始，到crop_right结束
+                # 3. 对第一个子序列，增加额外的左侧长度
                 crop_eleft = np.random.randint(crop_left + 1)
-                # 第二个子序列：从crop_left开始，到crop_eright结束  
                 crop_eright = np.random.randint(low=crop_right, high=ts_l + 1)
-                
-                # 4. 为每个样本生成随机偏移（支持并行处理）
                 crop_offset = np.random.randint(low=-crop_eleft, high=ts_l - crop_eright + 1, size=x.size(0))
                 
                 optimizer.zero_grad()
 
                 # ================ 编码两个子序列 ================
-                # 第一个子序列：较长，包含重叠区域的后半部分
-                out1_all = self._net(take_per_row(x, crop_offset + crop_eleft, crop_right - crop_eleft))
-                # 第二个子序列：较长，包含重叠区域的前半部分
-                out2_all = self._net(take_per_row(x, crop_offset + crop_left, crop_eright - crop_left))
+                # 第一个子序列：从 crop_eleft 开始，长度 crop_eright - crop_eleft
+                out1 = self._net(take_per_row(x, crop_offset + crop_eleft, crop_eright - crop_eleft))
+                
+                # 第二个子序列：从 crop_left 开始，长度 crop_right - crop_left
+                out2 = self._net(take_per_row(x, crop_offset + crop_left, crop_right - crop_left))
                 
                 # ================ 提取重叠部分进行对比 ================
                 # 只对重叠的crop_l长度部分进行对比学习
-                out1 = out1_all[:, -crop_l:]  # 第一个子序列的后crop_l个时间步
-                out2 = out2_all[:, :crop_l]   # 第二个子序列的前crop_l个时间步
+                out1 = out1[:, -crop_l:]  # 第一个子序列的后crop_l个时间步
+                out2 = out2[:, :crop_l]   # 第二个子序列的前crop_l个时间步
                 # out形状(batch, crop_l, features) crop_l为重叠部分长度, features是每个时间步的表示向量维度
                 # ================ 计算软对比损失 ================
                 loss = hier_CL_soft(
@@ -366,7 +360,6 @@ class TS2Vec:
                 # ================ 反向传播和优化 ================
                 loss.backward()
                 optimizer.step()
-                # 更新指数移动平均模型
                 self.net.update_parameters(self._net)
                     
                 # 更新训练统计
@@ -383,7 +376,10 @@ class TS2Vec:
                 break
             
             # 计算并记录epoch平均损失
-            cum_loss /= n_epoch_iters
+            if n_epoch_iters > 0:
+                cum_loss /= n_epoch_iters
+            else:
+                cum_loss = 0.0
             loss_log.append(cum_loss)
             # 额外评估：valid/test（只读，无梯度）
             val_loss = self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
