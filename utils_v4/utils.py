@@ -35,7 +35,7 @@ def pad_nan_to_target(array, target_length, axis=0, both_side=False):
         npad[axis] = (pad_size // 2, pad_size - pad_size//2)
     else:
         npad[axis] = (0, pad_size)
-    return np.pad(array, pad_width=npad, mode='constant', constant_values=np.nan)
+    return np.pad(array, pad_width=npad, mode='constant', constant_values=0)
 
 def split_with_nan(x, sections, axis=0):
     assert x.dtype in [np.float16, np.float32, np.float64]
@@ -46,8 +46,40 @@ def split_with_nan(x, sections, axis=0):
     return arrs
 
 def take_per_row(A, indx, num_elem):
-    all_indx = indx[:,None] + np.arange(num_elem)
-    return A[torch.arange(all_indx.shape[0])[:,None], all_indx]
+    """
+    等价功能（更稳健的纯 Torch 实现）:
+    - A: Tensor, 形状 (B, N, ...)，可在 CPU 或 CUDA 上
+    - indx: (B,) 的起始下标（可为 numpy/tensor/list），每行从 indx[b] 开始取连续 num_elem 个元素
+    - num_elem: int
+
+    返回: (B, num_elem, ...) 的切片结果，带越界断言，索引 dtype/device 一致。
+    """
+    if not isinstance(num_elem, int):
+        num_elem = int(num_elem)
+
+    device = A.device
+    B, N = A.shape[0], A.shape[1]
+
+    # 将 indx 转为同设备 long 张量，并校验形状
+    idx = torch.as_tensor(indx, device=device, dtype=torch.long)
+    if idx.ndim != 1:
+        idx = idx.view(-1)
+    assert idx.shape[0] == B, f"take_per_row: idx.shape[0] ({idx.shape[0]}) 必须等于 batch 大小 B ({B})"
+
+    # 严格越界检查（更早暴露问题，而不是触发不明确的 CUDA 错误）
+    if torch.any(idx < 0) or torch.any(idx + num_elem > N):
+        raise IndexError(
+            f"take_per_row: 索引越界: 需要满足 0 <= idx 且 idx+num_elem <= N，"
+            f" 其中 idx.min={int(idx.min().item())}, idx.max={int(idx.max().item())}, "
+            f"num_elem={num_elem}, N={N}"
+        )
+
+    # 构造 (B, num_elem) 的位置索引，并进行高级索引
+    offs = torch.arange(num_elem, device=device, dtype=torch.long)  # (num_elem,)
+    all_idx = idx.unsqueeze(1) + offs.unsqueeze(0)                  # (B, num_elem)
+    batch_idx = torch.arange(B, device=device, dtype=torch.long).unsqueeze(1)  # (B, 1)
+
+    return A[batch_idx, all_idx]
 
 def centerize_vary_length_series(x):
     prefix_zeros = np.argmax(~np.isnan(x).all(axis=-1), axis=1)

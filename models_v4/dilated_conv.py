@@ -17,7 +17,8 @@ class SamePadConv(nn.Module):
         self.remove = 1 if self.receptive_field % 2 == 0 else 0
         
     def forward(self, x):
-        out = self.conv(x)
+        # 确保卷积输入是连续内存，规避极端情况下的 CUDA 内核问题
+        out = self.conv(x.contiguous())
         if self.remove > 0:
             out = out[:, :, : -self.remove]
         return out
@@ -30,6 +31,8 @@ class ConvBlock(nn.Module):
         self.projector = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels or final else None
     
     def forward(self, x):
+        # 保证连续内存，避免部分后端在反向传播时报错
+        x = x.contiguous()
         residual = x if self.projector is None else self.projector(x)
         x = F.gelu(x)
         x = self.conv1(x)
@@ -52,7 +55,13 @@ class DilatedConvEncoder(nn.Module):
         ])
         
     def forward(self, x):
-        return self.net(x)
+        # 展开顺序执行，便于在出错时定位到具体 block
+        for i, block in enumerate(self.net):
+            x = block(x)
+            # 调试期安全检查：如发现非有限值，立刻报出具体层号
+            if not torch.isfinite(x).all():
+                raise ValueError(f"DilatedConvEncoder: 非有限值在第 {i} 个 ConvBlock 之后出现")
+        return x
     
 class DilatedConvEncoder_all_repr(nn.Module):
     def __init__(self, in_channels, channels, kernel_size):

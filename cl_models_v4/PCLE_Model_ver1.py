@@ -317,16 +317,22 @@ class TS2Vec:
                 x = x.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride) # (B, C, N, P)
                 B, C, N, P = x.shape
                 x = x.reshape(B*C, N, P) # 重塑为 (B*C, N, P), N作为时间步
-                
+                if self.n_epochs == 46:
+                    print(0)
                 # ================ 关键：随机裁剪策略 ================
                 # 这是TS2Vec的核心思想：从时间序列中裁剪两个重叠的子序列进行对比学习
                 ts_l = x.size(1)  # 时间序列长度
+                # 防御性检查：保证裁剪长度不超过可用长度
+                if ts_l < 20:
+                    raise ValueError(f"ts_l(={ts_l}) 小于固定裁剪长度 crop_l=20，可能因 patch 参数导致窗口数过少")
                 
+                # ***********************************************************************************
                 # 1. 随机确定重叠区域的长度（crop_l）
-                crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=ts_l+1)
+                crop_l = 20 # np.random.randint(low=2 ** (self.temporal_unit + 1), high=ts_l+1)
                 
                 # 2. 随机确定重叠区域在原序列中的位置
-                crop_left = np.random.randint(ts_l - crop_l + 1)
+                # crop_left = np.random.randint(ts_l - crop_l + 1)
+                crop_left = ts_l - crop_l
                 crop_right = crop_left + crop_l
                 
                 # 3. 为两个子序列随机扩展边界
@@ -339,17 +345,31 @@ class TS2Vec:
                 crop_offset = np.random.randint(low=-crop_eleft, high=ts_l - crop_eright + 1, size=x.size(0))
                 
                 optimizer.zero_grad()
-
+                # 启用异常检测，便于定位产生 NaN/Inf 的具体算子（调试期可开启，发布时可注释）
+                torch.autograd.set_detect_anomaly(True)
+                
                 # ================ 编码两个子序列 ================
+                # 先取子序列，再确保内存布局与数值稳定
+                seq1 = take_per_row(x, crop_offset + crop_eleft, crop_right - crop_eleft).contiguous()
+                seq2 = take_per_row(x, crop_offset + crop_left,  crop_eright - crop_left).contiguous()
+
+                # 调试期安全检查（如需可注释）：避免把非有限值送入卷积
+                if not torch.isfinite(seq1).all():
+                    raise ValueError("seq1 中存在 NaN/Inf，可能源自上游预处理或索引")
+                if not torch.isfinite(seq2).all():
+                    raise ValueError("seq2 中存在 NaN/Inf，可能源自上游预处理或索引")
+
                 # 第一个子序列：较长，包含重叠区域的后半部分
-                out1_all = self._net(take_per_row(x, crop_offset + crop_eleft, crop_right - crop_eleft))
+                out1_all = self._net(seq1)
                 # 第二个子序列：较长，包含重叠区域的前半部分
-                out2_all = self._net(take_per_row(x, crop_offset + crop_left, crop_eright - crop_left))
+                out2_all = self._net(seq2)
                 
                 # ================ 提取重叠部分进行对比 ================
                 # 只对重叠的crop_l长度部分进行对比学习
                 out1 = out1_all[:, -crop_l:]  # 第一个子序列的后crop_l个时间步
                 out2 = out2_all[:, :crop_l]   # 第二个子序列的前crop_l个时间步
+                # ***********************************************************************************
+                
                 # out形状(batch, crop_l, features) crop_l为重叠部分长度, features是每个时间步的表示向量维度
                 # ================ 计算软对比损失 ================
                 loss = hier_CL_soft(
@@ -365,29 +385,41 @@ class TS2Vec:
                 
                 # ================ 反向传播和优化 ================
                 loss.backward()
+                
+                has_nan = False
+                for name, param in self._net.named_parameters():
+                    if param.grad is not None:
+                        # 检查梯度中是否有NaN
+                        if torch.isnan(param.grad).any():
+                            print(f"梯度中存在NaN在: {name}")
+                            has_nan = True
+
                 optimizer.step()
                 # 更新指数移动平均模型
+                # ----------safe----------
                 self.net.update_parameters(self._net)
                     
                 # 更新训练统计
+                # ----------safe----------
                 cum_loss += loss.item()
                 n_epoch_iters += 1
                 self.n_iters += 1
                 
                 # 执行迭代后回调
+                # ----------safe----------
                 if self.after_iter_callback is not None:
                     self.after_iter_callback(self, loss.item())
             
             # 如果因达到迭代数限制而中断，退出训练循环
             if interrupted:
                 break
-            
+            # ----------safe----------
             # 计算并记录epoch平均损失
             cum_loss /= n_epoch_iters
             loss_log.append(cum_loss)
             # 额外评估：valid/test（只读，无梯度）
-            val_loss = self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
-            tst_loss = self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
+            val_loss = None# self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
+            tst_loss = None# self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
             if verbose:
                 msg = f"Epoch #{self.n_epochs}: train_loss={cum_loss}"
                 if val_loss is not None:
@@ -433,7 +465,7 @@ class TS2Vec:
             tb_logger.add_scalar('classification/acc_svm', acc, global_step = self.n_epochs)
             tb_logger.add_scalar('classification/auprc_svm', auprc, global_step = self.n_epochs)
             '''
-            
+            # ----------safe----------
             # 更新epoch计数器
             self.n_epochs += 1
             # 执行epoch后回调（传递完整的损失信息，便于记录日志与挑选best）
