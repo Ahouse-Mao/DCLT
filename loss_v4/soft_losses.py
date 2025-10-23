@@ -75,10 +75,10 @@ def temp_CL_soft(z1, z2, timelag_L, timelag_R):
     B, T = z1.size(0), z1.size(1)
     if T == 1:
         return z1.new_tensor(0.)  # 单时间步无法进行时间对比
-    test_mat1 = z1[1,:,:].squeeze(0)
-    logits_test = torch.matmul(test_mat1, test_mat1.transpose(0,1))
-    logits_test = -F.log_softmax(logits_test, dim=-1)
-    loss_test = torch.sum(logits_test[1,:])
+    # test_mat1 = z1[1,:,:].squeeze(0)
+    # logits_test = torch.matmul(test_mat1, test_mat1.transpose(0,1))
+    # logits_test = -F.log_softmax(logits_test, dim=-1)
+    # loss_test = torch.sum(logits_test[1,:])
     
     # 在时间维度上拼接两个子序列：[z1, z2] -> [B, 2T, C]
     z = torch.cat([z1, z2], dim=1)  # B x 2T x C

@@ -183,7 +183,7 @@ class TS2Vec:
         eval_patched = eval_tensor.cpu().numpy()
 
         dataset = custom_dataset(eval_patched)
-        loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False, drop_last=False)
+        loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False, drop_last=True)
 
         org_train_mode_net = self._net.training
         self._net.eval()

@@ -34,3 +34,9 @@ mse:0.18149086833000183, mae:0.22201484441757202, rse:0.5612255930900574
 weather_96_96_PatchTST_pretrained_v4_custom_ftM_sl96_ll48_pl96_dm320_nh16_el3_dl1_df256_fc1_ebtimeF_dtTrue_Exp_0  
 mse:0.17769791185855865, mae:0.22056744992733002, rse:0.5553300976753235
 
+weather_96_96_PatchTST_pretrained_v4_custom_ftM_sl96_ll48_pl96_dm256_nh16_el3_dl1_df256_fc1_ebtimeF_dtTrue_Exp_0  
+mse:0.18512743711471558, mae:0.2287275493144989, rse:0.5668203830718994
+
+weather_96_336_PatchTST_pretrained_v4_custom_ftM_sl96_ll48_pl336_dm256_nh16_el3_dl1_df256_fc1_ebtimeF_dtTrue_Exp_0  
+mse:0.28423821926116943, mae:0.30480629205703735, rse:0.7003309726715088
+

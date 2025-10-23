@@ -158,12 +158,12 @@ if __name__ == '__main__':
     parser.add_argument('--loader', type=str, default="forecast_csv", help='The data loader used to load the experimental data. This can be set to UCR, UEA, forecast_csv, forecast_csv_univar, anomaly, or anomaly_coldstart')
     parser.add_argument('--dist_type', type=str, default='DTW')
     parser.add_argument('--gpu', type=int, default=0, help='The gpu no. used for training and inference (defaults to 0)')
-    parser.add_argument('--batch-size', type=int, default=2, help='The batch size (defaults to 8)')
+    parser.add_argument('--batch-size', type=int, default=21, help='The batch size (defaults to 8)')
     parser.add_argument('--lr', type=float, default=0.001, help='The learning rate (defaults to 0.001)')
     parser.add_argument('--repr-dims', type=int, default=256, help='The representation dimension (defaults to 320)')
     parser.add_argument('--max-train-length', type=int, default=336, help='For sequence with a length greater than <max_train_length>, it would be cropped into some sequences, each of which has a length less than <max_train_length> (defaults to 3000)')
     parser.add_argument('--iters', type=int, default=None, help='The number of iterations')
-    parser.add_argument('--epochs', type=int, default=100, help='The number of epochs')
+    parser.add_argument('--epochs', type=int, default=500, help='The number of epochs')
     parser.add_argument('--save-every', type=int, default=None, help='Save the checkpoint every <save_every> iterations/epochs')
     parser.add_argument('--seed', type=int, default=None, help='The random seed')
     parser.add_argument('--eval', type=bool, default=False, help='Whether to perform evaluation after training')
@@ -180,7 +180,7 @@ if __name__ == '__main__':
     parser.add_argument('--patch_cl_ver', type=int, default=1, help='The version of patch-level contrastive learning model to use (1 or 2)')
     parser.add_argument('--patch_len', type=int, default=16, help='The length of each patch when using patch-level contrastive learning')
     parser.add_argument('--patch_stride', type=int, default=2, help='The stride between patches when using patch-level contrastive learning')
-    parser.add_argument('--depth', type=int, default=8, help='The depth of the model when using patch-level contrastive learning')
+    parser.add_argument('--depth', type=int, default=10, help='The depth of the model when using patch-level contrastive learning')
     parser.add_argument('--revin', type=int, default=1, help='RevIN; True 1 False 0')
     parser.add_argument('--eval_mode', type=str, default='Linear', help='The evaluation mode after training, Linear, Traditional')
     parser.add_argument('--TS', type=str, default=None, help='Timestamp')
@@ -407,7 +407,7 @@ if __name__ == '__main__':
     t = time.time()
     if args.use_patch_cl:
         if args.patch_cl_ver == 1:
-            from cl_models_v4.PCLE_Model_ver1 import TS2Vec
+            from cl_models_v4.PCLE_Model_ver1_ori import TS2Vec
         elif args.patch_cl_ver == 2:
             from cl_models_v4.PCLE_Model_ver2 import TS2Vec
             

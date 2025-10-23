@@ -134,19 +134,17 @@ class TS2Vec:
     
     def _compute_dataset_loss(self, data, soft_labels=None):
         """只读评估：在不更新参数的情况下计算一个数据集的对比损失均值。
-        复用训练时的数据预处理、随机裁剪与损失定义，以获得可对比的指标。
+        使评估阶段与 fit 中的数据处理严格一致（序列切段、RevIN、padding、patch 切分）。
         """
         if data is None or isinstance(data, (int, float)):
             return None
         assert data.ndim == 3
 
-        # 复制并应用与训练相同的预处理
+        # 1) 与 fit 一致：对过长序列按 max_train_length 切成整段，不做填充
         eval_data = data
         if self.max_train_length is not None and eval_data.shape[1] > self.max_train_length:
-            # 使用滑动窗口切分，不填充
             n_samples, seq_len, n_features = eval_data.shape
             n_segments = seq_len // self.max_train_length
-            
             if n_segments >= 2:
                 segments_list = []
                 for i in range(n_segments):
@@ -155,15 +153,37 @@ class TS2Vec:
                     segments_list.append(eval_data[:, start_idx:end_idx, :])
                 eval_data = np.concatenate(segments_list, axis=0)
 
-        temporal_missing = np.isnan(eval_data).all(axis=-1).any(axis=0)
-        if temporal_missing[0] or temporal_missing[-1]:
-            eval_data = centerize_vary_length_series(eval_data)
+        # 2) 与 fit 保持一致：不做变长序列居中与全 NaN 样本剔除（fit 中已注释）
+        # temporal_missing = np.isnan(eval_data).all(axis=-1).any(axis=0)
+        # if temporal_missing[0] or temporal_missing[-1]:
+        #     eval_data = centerize_vary_length_series(eval_data)
+        # eval_data = eval_data[~np.isnan(eval_data).all(axis=2).all(axis=1)]
 
-        eval_data = eval_data[~np.isnan(eval_data).all(axis=2).all(axis=1)]
+        # 3) 与 fit 完全一致的 patch 化流水线（放在 DataLoader 之前一次性完成）
+        eval_tensor = torch.FloatTensor(eval_data).to(self.device)  # (B, T, C)
+        eval_tensor = eval_tensor.permute(0, 2, 1)  # (B, C, T)
+        if self.revin:
+            eval_tensor = eval_tensor.permute(0, 2, 1)  # (B, T, C)
+            eval_tensor = self.revin_layer(eval_tensor, 'norm')
+            eval_tensor = eval_tensor.permute(0, 2, 1)  # (B, C, T)
+        if self.padding_patch == "end":
+            eval_tensor = self.padding_patch_layer(eval_tensor)
+        # (B, C, N, P)
+        eval_tensor = eval_tensor.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)
+        B, C, N, P = eval_tensor.shape
+        # (B*C, N, P)
+        eval_tensor = eval_tensor.reshape(B * C, N, P)
+        eval_patched = eval_tensor.detach().cpu().numpy()
 
-        dataset = custom_dataset(eval_data)
-        loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False, drop_last=False)
+        dataset = custom_dataset(eval_patched)
+        loader = DataLoader(
+            dataset,
+            batch_size=min(self.batch_size, len(dataset)),
+            shuffle=False,
+            drop_last=False,
+        )
 
+        # 4) 前向与损失（与 fit 的随机裁剪、loss 定义一致；评估使用 EMA 模型 self.net）
         org_train_mode_net = self._net.training
         self._net.eval()
 
@@ -171,28 +191,13 @@ class TS2Vec:
         n_iters = 0
         with torch.no_grad():
             for x, idx in loader:
-                # 软标签子矩阵
+                # 软标签子矩阵（与 fit 一致）
                 if soft_labels is None:
                     soft_labels_batch = None
                 else:
                     soft_labels_batch = soft_labels[idx][:, idx]
 
-                # 长序列随机裁剪与预处理
-                if self.max_train_length is not None and x.size(1) > self.max_train_length:
-                    window_offset = np.random.randint(x.size(1) - self.max_train_length + 1)
-                    x = x[:, window_offset: window_offset + self.max_train_length]
-                x = x.to(self.device)
-
-                x = x.reshape(x.shape[0], x.shape[2], -1)
-                if self.revin:
-                    x = x.permute(0, 2, 1)
-                    x = self.revin_layer(x, 'norm')
-                    x = x.permute(0, 2, 1)
-                if self.padding_patch == 'end':
-                    x = self.padding_patch_layer(x)
-                x = x.unfold(dimension=-1, size=self.patch_len, step=self.patch_stride)  # (B, C, N, P)
-                B, C, N, P = x.shape
-                x = x.reshape(B * C, N, P)
+                x = x.to(self.device)  # (batch, N, P) —— 已经是 patch 级别
 
                 ts_l = x.size(1)
                 crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=ts_l + 1)
