@@ -128,7 +128,7 @@ if __name__ == '__main__':
     parser.add_argument('--loader', type=str, default="forecast_csv", help='The data loader used to load the experimental data. This can be set to UCR, UEA, forecast_csv, forecast_csv_univar, anomaly, or anomaly_coldstart')
     parser.add_argument('--dist_type', type=str, default='DTW')
     parser.add_argument('--gpu', type=int, default=0, help='The gpu no. used for training and inference (defaults to 0)')
-    parser.add_argument('--batch-size', type=int, default=24, help='The batch size (defaults to 8)')
+    parser.add_argument('--batch-size', type=int, default=32, help='The batch size (defaults to 8)')
     parser.add_argument('--lr', type=float, default=0.001, help='The learning rate (defaults to 0.001)')
     parser.add_argument('--repr-dims', type=int, default=256, help='The representation dimension (defaults to 320)')
     parser.add_argument('--max-train-length', type=int, default=500, help='For sequence with a length greater than <max_train_length>, it would be cropped into some sequences, each of which has a length less than <max_train_length> (defaults to 3000)')

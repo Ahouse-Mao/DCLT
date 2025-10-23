@@ -154,7 +154,7 @@ class TS2Vec:
         eval_data = eval_data[~np.isnan(eval_data).all(axis=2).all(axis=1)]
 
         dataset = custom_dataset(eval_data)
-        loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False, drop_last=False)
+        loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False, drop_last=True)
 
         org_train_mode_net = self._net.training
         self._net.eval()
@@ -253,6 +253,7 @@ class TS2Vec:
         # 处理过长序列：如果序列长度超过max_train_length，则分段处理
         if self.max_train_length is not None:
             sections = train_data.shape[1] // self.max_train_length
+            train_data = train_data[:,:self.max_train_length*sections,:]
             if sections >= 2:
                 train_data = np.concatenate(split_with_nan(train_data, sections, axis=1), axis=0)
 
@@ -264,6 +265,8 @@ class TS2Vec:
         
         # 移除完全为NaN的样本
         train_data = train_data[~np.isnan(train_data).all(axis=2).all(axis=1)]
+        is_na = np.isnan(train_data)
+        num_na = np.sum(is_na)
         
         # 创建数据加载器
         train_dataset = custom_dataset(train_data)
@@ -386,8 +389,8 @@ class TS2Vec:
             cum_loss /= n_epoch_iters
             loss_log.append(cum_loss)
             # 额外评估：valid/test（只读，无梯度）
-            val_loss = self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
-            tst_loss = self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
+            val_loss = None# self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
+            tst_loss = None# self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
             if verbose:
                 msg = f"Epoch #{self.n_epochs}: train_loss={cum_loss}"
                 if val_loss is not None:
