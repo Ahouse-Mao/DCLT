@@ -17,7 +17,7 @@ class SamePadConv(nn.Module):
         self.remove = 1 if self.receptive_field % 2 == 0 else 0
         
     def forward(self, x):
-        out = self.conv(x)
+        out = self.conv(x.contiguous())
         if self.remove > 0:
             out = out[:, :, : -self.remove]
         return out
@@ -30,6 +30,7 @@ class ConvBlock(nn.Module):
         self.projector = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels or final else None
     
     def forward(self, x):
+        x = x.contiguous()
         residual = x if self.projector is None else self.projector(x)
         x = F.gelu(x)
         x = self.conv1(x)

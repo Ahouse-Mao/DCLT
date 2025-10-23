@@ -386,8 +386,8 @@ class TS2Vec:
             cum_loss /= n_epoch_iters
             loss_log.append(cum_loss)
             # 额外评估：valid/test（只读，无梯度）
-            val_loss = self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
-            tst_loss = self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
+            val_loss = None #self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
+            tst_loss = None #self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
             if verbose:
                 msg = f"Epoch #{self.n_epochs}: train_loss={cum_loss}"
                 if val_loss is not None:
