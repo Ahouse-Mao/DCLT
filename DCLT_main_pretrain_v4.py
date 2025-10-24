@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import argparse
 import os
+os.environ['TORCH_USE_CUDA_DSA'] = '1'
 import sys
 import time
 import random
@@ -124,14 +125,14 @@ def init_n_vars(args):
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', default="weather", help='The dataset name')
+    parser.add_argument('--dataset', default="ETTh1", help='The dataset name')
     parser.add_argument('--loader', type=str, default="forecast_csv", help='The data loader used to load the experimental data. This can be set to UCR, UEA, forecast_csv, forecast_csv_univar, anomaly, or anomaly_coldstart')
     parser.add_argument('--dist_type', type=str, default='DTW')
     parser.add_argument('--gpu', type=int, default=0, help='The gpu no. used for training and inference (defaults to 0)')
-    parser.add_argument('--batch-size', type=int, default=32, help='The batch size (defaults to 8)')
+    parser.add_argument('--batch_size', type=int, default=16, help='The batch size (defaults to 8)')
     parser.add_argument('--lr', type=float, default=0.001, help='The learning rate (defaults to 0.001)')
     parser.add_argument('--repr-dims', type=int, default=256, help='The representation dimension (defaults to 320)')
-    parser.add_argument('--max-train-length', type=int, default=500, help='For sequence with a length greater than <max_train_length>, it would be cropped into some sequences, each of which has a length less than <max_train_length> (defaults to 3000)')
+    parser.add_argument('--max-train-length', type=int, default=336, help='For sequence with a length greater than <max_train_length>, it would be cropped into some sequences, each of which has a length less than <max_train_length> (defaults to 3000)')
     parser.add_argument('--iters', type=int, default=None, help='The number of iterations')
     parser.add_argument('--epochs', type=int, default=300, help='The number of epochs')
     parser.add_argument('--save-every', type=int, default=None, help='Save the checkpoint every <save_every> iterations/epochs')
@@ -142,7 +143,7 @@ if __name__ == '__main__':
     parser.add_argument('--tau_temp', type=float, default=0.5)
     parser.add_argument('--alpha', type=float, default=0.5)
     parser.add_argument('--lambda_', type=float, default=0.5)
-    parser.add_argument('--expid', type=int, default=2)
+    parser.add_argument('--expid', type=int, default=131)
     parser.add_argument('--separate_reg', action="store_true", help='Whether to perform weighting in temporal loss')
     parser.add_argument('--test_encode', type=bool, default=False, help='Whether to test the encoder after training')
     # 添加的额外参数
@@ -152,6 +153,7 @@ if __name__ == '__main__':
     parser.add_argument('--patch_stride', type=int, default=2, help='The stride between patches when using patch-level contrastive learning')
     parser.add_argument('--depth', type=int, default=8, help='The depth of the model when using patch-level contrastive learning')
     parser.add_argument('--revin', type=int, default=1, help='RevIN; True 1 False 0')
+    parser.add_argument('--TS', type=str, default=None, help='Timestamp')
     args = parser.parse_args()
 
     args = init_n_vars(args) # 根据数据集名称初始化 n_vars 参数
@@ -181,10 +183,53 @@ if __name__ == '__main__':
 
     # =============== Checkpoints 目录（根据用户要求） ===============
     # ./checkpoints/{dataset}/{patch_len}-{repr-dims}v4{时间戳}/
-    timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-    ckpt_sub = f"{args.patch_len}-{args.repr_dims}_v4_{timestamp}"
+    timestamp = args.TS
+    ckpt_sub = f"{timestamp}_{args.epochs}_{args.patch_len}_{args.patch_stride}_{args.max_train_length}_{args.repr_dims}"
     ckpt_dir = os.path.join('.', 'checkpoints', args.dataset, ckpt_sub)
     os.makedirs(ckpt_dir, exist_ok=True)
+    # 中断输出同时保存到checkpoints下的run.log文件
+    import atexit
+    
+    log_file_path = os.path.join(ckpt_dir, 'run.log')
+    try:
+        _log_f = open(log_file_path, 'a', encoding='utf-8')
+    except Exception:
+        _log_f = None
+
+    class Tee(object):
+        def __init__(self, *streams):
+            self.streams = streams
+        def write(self, data):
+            for s in self.streams:
+                try:
+                    s.write(data)
+                except Exception:
+                    pass
+        def flush(self):
+            for s in self.streams:
+                try:
+                    s.flush()
+                except Exception:
+                    pass
+
+    if _log_f is not None:
+        sys.stdout = Tee(sys.stdout, _log_f)
+        sys.stderr = Tee(sys.stderr, _log_f)
+        atexit.register(lambda: _log_f.close())
+        # 立即把关键信息写入日志文件（有些早期打印可能发生在 Tee 安装之前）
+        try:
+            _log_f.write('----- RUN HEADER -----\n')
+            _log_f.write(f'Timestamp: {timestamp}\n')
+            try:
+                _log_f.write(f'Dataset: {args.dataset}\n')
+                _log_f.write(f'Arguments: {str(args)}\n')
+            except Exception:
+                # args 可能尚未完全可用，忽略写入错误
+                pass
+            _log_f.write('----------------------\n')
+            _log_f.flush()
+        except Exception as e:
+            print(f"[warn] failed to write header into run.log: {e}")
     
     # file_exists = os.path.join(run_dir,f'eval_res_{args.dist_type}.pkl')
         

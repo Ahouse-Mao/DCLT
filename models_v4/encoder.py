@@ -41,6 +41,7 @@ class TSEncoder(nn.Module):
     def forward(self, x, mask=None):  # x: B x T x input_dims
         nan_mask = ~x.isnan().any(axis=-1)
         x[~nan_mask] = 0
+        x = x.contiguous()
         x = self.input_fc(x)  # B x T x Ch
         
         # generate & apply mask
@@ -66,8 +67,24 @@ class TSEncoder(nn.Module):
         x[~mask] = 0
         
         # conv encoder
-        x = x.transpose(1, 2)  # B x Ch x T
-        x = self.repr_dropout(self.feature_extractor(x))  # B x Co x T
+        x = x.transpose(1, 2).contiguous()  # B x Ch x T
+        # 运行时后端回退：若 cuDNN 在特定尺寸/stride 组合下失败，临时关闭 cuDNN 重试
+        try:
+            x = self.feature_extractor(x)
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if 'cudnn' in msg or 'illegal memory' in msg:
+                print(f"[WARN] cuDNN error detected, retrying with cuDNN disabled: {e}")
+                _prev = torch.backends.cudnn.enabled
+                torch.backends.cudnn.enabled = False
+                try:
+                    x = self.feature_extractor(x)
+                    print("[INFO] Successfully retried without cuDNN")
+                finally:
+                    torch.backends.cudnn.enabled = _prev
+            else:
+                raise
+        x = self.repr_dropout(x)  # B x Co x T
         x = x.transpose(1, 2)  # B x T x Co
         
         return x

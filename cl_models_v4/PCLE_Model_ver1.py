@@ -154,7 +154,7 @@ class TS2Vec:
         eval_data = eval_data[~np.isnan(eval_data).all(axis=2).all(axis=1)]
 
         dataset = custom_dataset(eval_data)
-        loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=False, drop_last=False)
+        loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=True, drop_last=False)
 
         org_train_mode_net = self._net.training
         self._net.eval()
@@ -194,8 +194,11 @@ class TS2Vec:
                 crop_eright = np.random.randint(low=crop_right, high=ts_l + 1)
                 crop_offset = np.random.randint(low=-crop_eleft, high=ts_l - crop_eright + 1, size=x.size(0))
 
-                out1_all = self._net(take_per_row(x, crop_offset + crop_eleft, crop_right - crop_eleft))
-                out2_all = self._net(take_per_row(x, crop_offset + crop_left, crop_eright - crop_left))
+                # 与 fit 中保持一致：按行裁剪生成两个视图，并确保内存连续
+                seq1 = take_per_row(x, crop_offset + crop_eleft, crop_right - crop_eleft).contiguous()
+                seq2 = take_per_row(x, crop_offset + crop_left,  crop_eright - crop_left).contiguous()
+                out1_all = self._net(seq1)
+                out2_all = self._net(seq2)
 
                 out1 = out1_all[:, -crop_l:]
                 out2 = out2_all[:, :crop_l]
@@ -268,7 +271,7 @@ class TS2Vec:
         # 创建数据加载器
         train_dataset = custom_dataset(train_data)
         train_loader = DataLoader(train_dataset, batch_size=min(self.batch_size, len(train_dataset)), 
-                                 shuffle=True, drop_last=True)
+                                 shuffle=True, drop_last=False)
         
         # 初始化优化器
         optimizer = torch.optim.AdamW(self._net.parameters(), lr=self.lr)
@@ -321,6 +324,8 @@ class TS2Vec:
                 # ================ 关键：随机裁剪策略 ================
                 # 这是TS2Vec的核心思想：从时间序列中裁剪两个重叠的子序列进行对比学习
                 ts_l = x.size(1)  # 时间序列长度
+                if self.n_epochs == 6:
+                    print("debug")
                 
                 # 1. 随机确定重叠区域的长度（crop_l）
                 crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=ts_l+1)
@@ -339,12 +344,23 @@ class TS2Vec:
                 crop_offset = np.random.randint(low=-crop_eleft, high=ts_l - crop_eright + 1, size=x.size(0))
                 
                 optimizer.zero_grad()
+                # 启用异常检测，便于定位产生 NaN/Inf 的具体算子（调试期可开启，发布时可注释）
+                torch.autograd.set_detect_anomaly(True)
 
                 # ================ 编码两个子序列 ================
                 # 第一个子序列：较长，包含重叠区域的后半部分
-                out1_all = self._net(take_per_row(x, crop_offset + crop_eleft, crop_right - crop_eleft))
+                seq_1 = take_per_row(x, crop_offset + crop_eleft, crop_right - crop_eleft).contiguous()
+                seq_2 = take_per_row(x, crop_offset + crop_left,  crop_eright - crop_left).contiguous()
+
+                out1_all = self._net(seq_1)
                 # 第二个子序列：较长，包含重叠区域的前半部分
-                out2_all = self._net(take_per_row(x, crop_offset + crop_left, crop_eright - crop_left))
+                out2_all = self._net(seq_2)
+
+                # 调试期安全检查（如需可注释）：避免把非有限值送入卷积
+                if not torch.isfinite(out1_all).all():
+                    raise ValueError("out1_all 中存在 NaN/Inf，可能源自上游预处理或索引")
+                if not torch.isfinite(out2_all).all():
+                    raise ValueError("out2_all 中存在 NaN/Inf，可能源自上游预处理或索引")
                 
                 # ================ 提取重叠部分进行对比 ================
                 # 只对重叠的crop_l长度部分进行对比学习
@@ -362,9 +378,24 @@ class TS2Vec:
                     soft_temporal=self.soft_temporal,  # 是否使用时间级软对比
                     soft_instance=self.soft_instance   # 是否使用实例级软对比
                 )
-                
+
                 # ================ 反向传播和优化 ================
                 loss.backward()
+
+                # 梯度裁剪与 NaN/Inf 检查
+                # torch.nn.utils.clip_grad_norm_(self._net.parameters(), max_norm=1.0)
+                
+                has_nan_grad = False
+                for name, param in self._net.named_parameters():
+                    if param.grad is not None and torch.isnan(param.grad).any():
+                        print(f"!!! Detected NaN gradient in {name} !!!")
+                        has_nan_grad = True
+                
+                if has_nan_grad:
+                    # 如果检测到NaN梯度，可以选择跳过此次更新或抛出异常
+                    # 这里我们抛出异常，以便于调试
+                    raise RuntimeError("NaN gradient detected. Stopping training.")
+                
                 optimizer.step()
                 # 更新指数移动平均模型
                 self.net.update_parameters(self._net)
@@ -389,6 +420,7 @@ class TS2Vec:
             val_loss = None #self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
             tst_loss = None #self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
             if verbose:
+
                 msg = f"Epoch #{self.n_epochs}: train_loss={cum_loss}"
                 if val_loss is not None:
                     msg += f" valid_loss={val_loss}"
