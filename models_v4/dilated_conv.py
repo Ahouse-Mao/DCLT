@@ -17,7 +17,7 @@ class SamePadConv(nn.Module):
         self.remove = 1 if self.receptive_field % 2 == 0 else 0
         
     def forward(self, x):
-        out = self.conv(x.contiguous())
+        out = self.conv(x)
         if self.remove > 0:
             out = out[:, :, : -self.remove]
         return out
@@ -27,18 +27,10 @@ class ConvBlock(nn.Module):
         super().__init__()
         self.conv1 = SamePadConv(in_channels, out_channels, kernel_size, dilation=dilation)
         self.conv2 = SamePadConv(out_channels, out_channels, kernel_size, dilation=dilation)
-        if in_channels != out_channels or final:
-            self.projector = nn.Conv1d(in_channels, out_channels, 1)
-        else:
-            self.projector = None
-
+        self.projector = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels or final else None
+    
     def forward(self, x):
-        x = x.contiguous()
-        if self.projector is None:
-            residual = x
-        else:
-            # 针对 projector（1x1 conv）也确保输入连续，规避后端问题
-            residual = self.projector(x.contiguous())
+        residual = x if self.projector is None else self.projector(x)
         x = F.gelu(x)
         x = self.conv1(x)
         x = F.gelu(x)
@@ -60,7 +52,6 @@ class DilatedConvEncoder(nn.Module):
         ])
         
     def forward(self, x):
-        x = x.contiguous()
         return self.net(x)
     
 class DilatedConvEncoder_all_repr(nn.Module):

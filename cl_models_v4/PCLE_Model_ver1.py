@@ -324,8 +324,6 @@ class TS2Vec:
                 # ================ 关键：随机裁剪策略 ================
                 # 这是TS2Vec的核心思想：从时间序列中裁剪两个重叠的子序列进行对比学习
                 ts_l = x.size(1)  # 时间序列长度
-                if self.n_epochs == 6:
-                    print("debug")
                 
                 # 1. 随机确定重叠区域的长度（crop_l）
                 crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=ts_l+1)
@@ -385,16 +383,16 @@ class TS2Vec:
                 # 梯度裁剪与 NaN/Inf 检查
                 # torch.nn.utils.clip_grad_norm_(self._net.parameters(), max_norm=1.0)
                 
-                has_nan_grad = False
-                for name, param in self._net.named_parameters():
-                    if param.grad is not None and torch.isnan(param.grad).any():
-                        print(f"!!! Detected NaN gradient in {name} !!!")
-                        has_nan_grad = True
+                # has_nan_grad = False
+                # for name, param in self._net.named_parameters():
+                #     if param.grad is not None and torch.isnan(param.grad).any():
+                #         print(f"!!! Detected NaN gradient in {name} !!!")
+                #         has_nan_grad = True
                 
-                if has_nan_grad:
-                    # 如果检测到NaN梯度，可以选择跳过此次更新或抛出异常
-                    # 这里我们抛出异常，以便于调试
-                    raise RuntimeError("NaN gradient detected. Stopping training.")
+                # if has_nan_grad:
+                #     # 如果检测到NaN梯度，可以选择跳过此次更新或抛出异常
+                #     # 这里我们抛出异常，以便于调试
+                #     raise RuntimeError("NaN gradient detected. Stopping training.")
                 
                 optimizer.step()
                 # 更新指数移动平均模型
@@ -417,8 +415,8 @@ class TS2Vec:
             cum_loss /= n_epoch_iters
             loss_log.append(cum_loss)
             # 额外评估：valid/test（只读，无梯度）
-            val_loss = None #self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
-            tst_loss = None #self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
+            val_loss = self._compute_dataset_loss(valid_data, None) if valid_data is not None else None
+            tst_loss = self._compute_dataset_loss(test_data_eval, None) if test_data_eval is not None else None
             if verbose:
 
                 msg = f"Epoch #{self.n_epochs}: train_loss={cum_loss}"

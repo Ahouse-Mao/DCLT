@@ -9,7 +9,7 @@ from cl_models_v4 import PCLE_Model_ver2
 def load_pretrained_model(configs):
     data_name = Path(configs.data_path).stem # 去掉.csv后缀，便于后续的索引
     model_state = configs.model_state
-    model_dir = os.path.join("/home/wms/South/DCLT/checkpoints/", f"{data_name}/")
+    model_dir = os.path.join("/home/wms/South/DCLT/checkpoints/", f"{data_name}/", configs.pretrain_folder)
 
     model, cfg = find_model(model_dir, 'pkl')
     # model = init_state_of_model(model, model_state)
@@ -20,26 +20,10 @@ def load_pretrained_model(configs):
 def find_model(model_dir, load_mode='pkl'):
     if not os.path.exists(model_dir):
         raise FileNotFoundError(f"目录不存在: {model_dir}")
-    
-     # 获取目录下所有子文件夹及其修改时间
-    subdirs = [
-        (item, os.path.getmtime(os.path.join(model_dir, item)))
-        for item in os.listdir(model_dir)
-        if os.path.isdir(os.path.join(model_dir, item))
-    ]
-
-    if not subdirs:
-        raise FileNotFoundError(f"在 {model_dir} 中没有找到任何子文件夹")
-
-    # 按修改时间排序，获取最新的文件夹
-    latest_dir = max(subdirs, key=lambda x: x[1])[0]
-    model_dir = os.path.join(model_dir, latest_dir)
 
     if load_mode == 'pkl':
         # 获取文件夹中对应后缀的文件
-        ckpt_files = [f for f in os.listdir(model_dir) if f.endswith('.pkl')]
-        if not ckpt_files:
-            raise FileNotFoundError(f"在 {model_dir} 中没有找到 .pkl 文件")
+        ckpt_files = os.path.join(model_dir, 'best.pkl')
 
         # 读取配置文件
         cfg_dir = os.path.join(model_dir, f"config.yaml")

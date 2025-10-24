@@ -183,7 +183,10 @@ if __name__ == '__main__':
 
     # =============== Checkpoints 目录（根据用户要求） ===============
     # ./checkpoints/{dataset}/{patch_len}-{repr-dims}v4{时间戳}/
-    timestamp = args.TS
+    if args.TS is None:
+        timestamp = datetime.datetime.now().strftime('%d_%H')
+    else:
+        timestamp = args.TS
     ckpt_sub = f"{timestamp}_{args.epochs}_{args.patch_len}_{args.patch_stride}_{args.max_train_length}_{args.repr_dims}"
     ckpt_dir = os.path.join('.', 'checkpoints', args.dataset, ckpt_sub)
     os.makedirs(ckpt_dir, exist_ok=True)

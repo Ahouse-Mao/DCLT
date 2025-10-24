@@ -19,12 +19,12 @@ seq_len=96
 default_batch_size=16
 
 # 参数集合（按需修改）
-epochs_list=(200)
+epochs_list=(20 20 200 200)
 tau_temp=(0.5)
-patch_lens=(16 32)
-patch_strides=(2 1 4)
-max_train_lengths=(336 600 1000)
-repr_dims_list=(256 192)
+patch_lens=(16)
+patch_strides=(2)
+max_train_lengths=(336)
+repr_dims_list=(256)
 pred_lens=(96 336)
 
 # 原子化的 run_and_continue：第一个参数必须是 logfile
@@ -65,7 +65,7 @@ pred_lens=(96 336)
 # }
 
 # 主循环
-for dataset in weather; do
+for dataset in ETTh1; do
     for epoch in "${epochs_list[@]}"; do
         for tau in "${tau_temp[@]}"; do
             for patch_len in "${patch_lens[@]}"; do
@@ -110,6 +110,7 @@ for dataset in weather; do
                                 # run_and_continue_atomic "${logfile}" 
                                 mkdir -p "$(dirname "${logfile}")"
                                 python -u ./PatchTST_supervised/run_longExp_v4.py \
+                                    --pretrain_folder "${TS}_${epoch}_${patch_len}_${patch_stride}_${max_train_len}_${repr_dims}" \
                                     --random_seed "${random_seed}" \
                                     --is_training 1 \
                                     --root_path "${root_path_name}" \
@@ -133,7 +134,7 @@ for dataset in weather; do
                                     --des 'Exp' \
                                     --train_epochs 100 \
                                     --patience 20 \
-                                    --itr 1 --batch_size 128 --learning_rate 0.0001 >"${logfile}" 2>&1
+                                    --itr 1 --batch_size 512 --learning_rate 0.0001 >"${logfile}" 2>&1
                                 rc_pretrain_eval=$?
                                 if [[ ${rc_pretrain_eval} -ne 0 ]]; then
                                     echo -e "\n=== FAILED with exit code ${rc_pretrain_eval} ===" >>"${logfile}"
@@ -149,6 +150,7 @@ for dataset in weather; do
                             #     # run_and_continue_atomic "${logfile}" 
                             #     mkdir -p "$(dirname "${logfile}")"
                             #     python -u ./PatchTST_supervised/run_longExp_v4.py \
+                            #         --pretrain_folder "${TS}_${epoch}_${patch_len}_${patch_stride}_${max_train_len}_${repr_dims}" \
                             #         --random_seed "${random_seed}" \
                             #         --is_training 1 \
                             #         --root_path "${root_path_name}" \
@@ -172,7 +174,7 @@ for dataset in weather; do
                             #         --des 'Exp' \
                             #         --train_epochs 100 \
                             #         --patience 20 \
-                            #         --itr 1 --batch_size 64 --learning_rate 0.0001 >"${logfile}" 2>&1
+                            #         --itr 1 --batch_size 256 --learning_rate 0.0001 >"${logfile}" 2>&1
                             #     rc_pretrain_eval=$?
                             #     if [[ ${rc_pretrain_eval} -ne 0 ]]; then
                             #         echo -e "\n=== FAILED with exit code ${rc_pretrain_eval} ===" >>"${logfile}"

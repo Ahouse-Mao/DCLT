@@ -118,7 +118,7 @@ parser.add_argument('--enable_cross_attn', type=bool, default=False, help='wheth
 # v4版本没有加新的参数
 parser.add_argument('--load_mode', type=str, default='pkl', help='load mode, ckpt or onnx')
 parser.add_argument('--model_state', type=str, default='reason', help='model state, reason or finetune')
-
+parser.add_argument('--pretrain_folder', type=str, default='24_05_20_16_1_336_256')
 args = parser.parse_args()
 
 # random seed
