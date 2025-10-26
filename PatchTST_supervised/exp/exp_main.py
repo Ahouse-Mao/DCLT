@@ -17,6 +17,9 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 
+# 新增导入optuna
+import optuna
+
 warnings.filterwarnings('ignore')
 
 class Exp_Main(Exp_Basic):
@@ -121,6 +124,11 @@ class Exp_Main(Exp_Basic):
         if not os.path.exists(path):
             os.makedirs(path)
 
+        # 增加的调优部分
+        # 使用 getattr 代替错误的 hasattr(...) 三参数调用，提供默认 False
+        if getattr(self.args, 'use_optuna', False):
+            self.optuna_trial = getattr(self.args, 'optuna_trial', None)
+        
         time_now = time.time()
 
         train_steps = len(train_loader)
@@ -238,6 +246,28 @@ class Exp_Main(Exp_Basic):
                 test_loss = self.vali(test_data, test_loader, criterion)
                 print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
                     epoch + 1, train_steps, train_loss, vali_loss, test_loss))
+            
+            # ===== 新增 (C) : Optuna 中间结果上报 + 剪枝 (pruning) =====
+            # 如果 self.optuna_trial 不为 None，则把当前 epoch 的验证损失报告给 Optuna，
+            # 然后询问 Optuna 是否要提前中止 (prune) 该 trial。
+            # 使用 getattr 代替错误的 hasattr(...) 三参数调用，提供默认 False
+            if getattr(self.args, 'use_optuna', False):
+                if getattr(self, 'optuna_trial', None) is not None:
+                    try:
+                        # 向 Optuna 上报中间目标值（验证损失），供 pruner 判断
+                        self.optuna_trial.report(float(vali_loss), epoch)
+                        # 若 pruner 认为该 trial 应被剪枝，则抛出 TrialPruned 异常
+                        if self.optuna_trial.should_prune():
+                            # 抛出特定异常：外部调用者（optuna.optimize）会捕获并记录为 Pruned
+                            raise optuna.exceptions.TrialPruned()
+                    except optuna.exceptions.TrialPruned:
+                        # 为了清晰地让外层捕获并处理 prune，这里重新抛出
+                        raise
+                    except Exception as _e:
+                        # 不要让上报/剪枝逻辑影响正常训练流程，打印错误并继续训练
+                        print("Optuna reporting/pruning failed:", _e)
+            # ======================================================================
+
             early_stopping(vali_loss, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")

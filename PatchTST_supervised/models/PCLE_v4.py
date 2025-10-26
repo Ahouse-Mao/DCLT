@@ -9,7 +9,6 @@ import torch.nn.functional as F
 import numpy as np
 
 from layers.PCLE_backbone_v4 import PCLE
-from layers.PatchTST_layers import series_decomp
 
 
 class Model(nn.Module):

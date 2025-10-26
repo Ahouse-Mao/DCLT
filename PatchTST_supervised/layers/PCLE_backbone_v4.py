@@ -29,6 +29,7 @@ class PCLE(nn.Module):
         # PCLE
         self.use_PCLE = configs.use_PCLE
         self.pcle_outdims = configs.pcle_outdims
+        self.enable_cross_attn = configs.enable_cross_attn
 
         self.d_model = d_model
         
@@ -77,6 +78,15 @@ class PCLE(nn.Module):
                     nn.ReLU(),
                     nn.Linear(256, self.d_model)
                 )
+        if self.enable_cross_attn:
+            self.cross_attn = nn.MultiheadAttention(
+                embed_dim=d_model,
+                num_heads=cross_attn_heads,
+                dropout=cross_attn_dropout,
+                batch_first=True,
+            )
+            self.cross_attn_dropout = nn.Dropout(cross_attn_dropout)
+            self.cross_attn_norm = nn.LayerNorm(d_model)
         
 
     def forward(self, z):                                                                   # z: [bs x nvars x seq_len]
@@ -97,7 +107,17 @@ class PCLE(nn.Module):
         if self.use_PCLE:
             z, cl_loss = self.PCLE_module(z)                                                      # x: [bs x nvars x N x output_dims]
             if self.pcle_outdims != self.d_model:
-                z = self.proj_layer(z)                                                   # x: [bs x nvars x N x d_model]
+                z = self.proj_layer(z)  
+            if self.enable_cross_attn:
+                if z.dim() != 4:
+                    raise ValueError(f"Expected embedding output with 4 dims, got shape {z.shape}")
+                bsz, nvars, patch_num, d_model = z.shape
+                # cross_in = z.permute(0, 2, 1, 3).contiguous().view(bsz * patch_num, nvars, d_model)
+                cross_in = z.reshape(bsz, nvars * patch_num, d_model)
+                attn_out, _ = self.cross_attn(cross_in, cross_in, cross_in)
+                cross_in = self.cross_attn_norm(cross_in + self.cross_attn_dropout(attn_out))
+                z = cross_in.view(bsz, nvars, patch_num, d_model).contiguous()
+                                                             # x: [bs x nvars x N x d_model]
 
         # model
         z = self.backbone(z)                                                                # z: [bs x nvars x d_model x patch_num]

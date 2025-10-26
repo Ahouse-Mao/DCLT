@@ -2,7 +2,6 @@ import torch
 import numpy as np
 import argparse
 import os
-os.environ['TORCH_USE_CUDA_DSA'] = '1'
 import sys
 import time
 import random

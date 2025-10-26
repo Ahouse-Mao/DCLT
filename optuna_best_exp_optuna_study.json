@@ -1,0 +1,17 @@
+{
+  "learning_rate": 0.00017944879674132197,
+  "d_model": 256,
+  "pcle_outdims": 512,
+  "enable_cross_attn": false,
+  "d_ff": 384,
+  "dropout": 0.5,
+  "batch_size": 64,
+  "seq_len": 96,
+  "pred_len": 96,
+  "patch_len": 24,
+  "stride": 16,
+  "pcle_depth": 4,
+  "pcle_temporal_unit": 1,
+  "cl_weight": 0.4173944841034521,
+  "pcle_tau_temp": 1.1095320989457873
+}

@@ -112,7 +112,7 @@ parser.add_argument('--test_flop', action='store_true', default=False, help='See
 # parser.add_argument('--cross_attention_type', type=str, default='full', help='full or patch')
 
 # v3版本的cl模型
-parser.add_argument('--use_pretrained_cl', type=bool, default=True, help='whether to use pretrained cl model; True 1 False 0')
+parser.add_argument('--use_pretrained_cl', type=bool, default=False, help='whether to use pretrained cl model; True 1 False 0')
 parser.add_argument('--enable_cross_attn', type=bool, default=True, help='whether to use cross-attention; True 1 False 0')
 
 # v4版本没有加新的参数
@@ -135,6 +135,9 @@ parser.add_argument('--tau_temp', type=float, default=0.5, help='temperature par
 parser.add_argument('--pcle_soft_temporal', type=bool, default=True, help='whether to use soft temporal for PCLE module; True 1 False 0')
 parser.add_argument('--tau_inst', type=float, default=0.5, help='temperature parameter for instance contrastive loss in PCLE module')
 parser.add_argument('--cl_weight', type=float, default=0.01, help='weight for contrastive learning loss')
+
+parser.add_argument('--pcle_patch_len', type=int, default=16, help='patch length for PCLE module')
+parser.add_argument('--pcle_stride', type=int, default=8, help='stride for PCLE module')
 
 args = parser.parse_args()
 
