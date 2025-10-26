@@ -22,8 +22,8 @@ parser.add_argument('--random_seed', type=int, default=2021, help='random seed')
 # basic config
 parser.add_argument('--is_training', type=int, default=1, help='status')
 parser.add_argument('--model_id', type=str, default='test', help='model id')
-parser.add_argument('--model', type=str, default='PatchTST_pretrained_v4',
-                    help='model name, options: [Autoformer, Informer, Transformer, PatchTST, PatchTST_pretrained_v3, PatchTST_pretrained_v4]')
+parser.add_argument('--model', type=str, default='PCLE_v4',
+                    help='model name, options: [Autoformer, Informer, Transformer, PatchTST, PatchTST_pretrained_v3, PatchTST_pretrained_v4, PCLE_v4]')
 
 # data loader
 parser.add_argument('--data', type=str, default='custom', help='dataset type')
@@ -49,7 +49,7 @@ parser.add_argument('--pred_len', type=int, default=96, help='prediction sequenc
 parser.add_argument('--fc_dropout', type=float, default=0.2, help='fully connected dropout')
 parser.add_argument('--head_dropout', type=float, default=0.0, help='head dropout')
 parser.add_argument('--patch_len', type=int, default=16, help='patch length')
-parser.add_argument('--stride', type=int, default=2, help='stride')
+parser.add_argument('--stride', type=int, default=8, help='stride')
 parser.add_argument('--padding_patch', default='end', help='None: None; end: padding on the end')
 parser.add_argument('--revin', type=int, default=1, help='RevIN; True 1 False 0')
 parser.add_argument('--affine', type=int, default=0, help='RevIN-affine; True 1 False 0')
@@ -63,7 +63,7 @@ parser.add_argument('--embed_type', type=int, default=0, help='0: default 1: val
 parser.add_argument('--enc_in', type=int, default=21, help='encoder input size') # DLinear with --individual, use this hyperparameter as the number of channels
 parser.add_argument('--dec_in', type=int, default=21, help='decoder input size')
 parser.add_argument('--c_out', type=int, default=21, help='output size')
-parser.add_argument('--d_model', type=int, default=256, help='dimension of model')
+parser.add_argument('--d_model', type=int, default=128, help='dimension of model')
 parser.add_argument('--n_heads', type=int, default=16, help='num of heads')
 parser.add_argument('--e_layers', type=int, default=3, help='num of encoder layers')
 parser.add_argument('--d_layers', type=int, default=1, help='num of decoder layers')
@@ -113,12 +113,29 @@ parser.add_argument('--test_flop', action='store_true', default=False, help='See
 
 # v3版本的cl模型
 parser.add_argument('--use_pretrained_cl', type=bool, default=True, help='whether to use pretrained cl model; True 1 False 0')
-parser.add_argument('--enable_cross_attn', type=bool, default=False, help='whether to use cross-attention; True 1 False 0')
+parser.add_argument('--enable_cross_attn', type=bool, default=True, help='whether to use cross-attention; True 1 False 0')
 
 # v4版本没有加新的参数
 parser.add_argument('--load_mode', type=str, default='pkl', help='load mode, ckpt or onnx')
 parser.add_argument('--model_state', type=str, default='reason', help='model state, reason or finetune')
 parser.add_argument('--pretrain_folder', type=str, default='24_05_20_16_1_336_256')
+parser.add_argument('--pretrain_d_model', type=int, default=128, help='d_model used in pretraining')
+
+# PCLE模型新增参数
+parser.add_argument('--use_PCLE', type=bool, default=True, help='whether to use Patch Contrastive Learning Embedding; True 1 False 0')
+parser.add_argument('--pcle_feature_extract_net', type=str, default='dilated_conv', help='feature extract net for PCLE module, dilated_conv, ')
+parser.add_argument('--pcle_temporal_unit', type=int, default=0, help='temporal unit for PCLE module, patch or timepoint')
+parser.add_argument('--pcle_outdims', type=int, default=128, help='output dims of PCLE module')
+parser.add_argument('--pcle_hidden_dims', type=int, default=64, help='hidden dims of PCLE module')
+
+parser.add_argument('--pcle_depth', type=int, default=8, help='depth of PCLE module')
+parser.add_argument('--lambda_', type=float, default=0.5, help='weight of instance contrastive loss and temporal contrastive loss')
+parser.add_argument('--pcle_soft_instance', type=bool, default=False, help='whether to use soft instance for PCLE module; True 1 False 0')
+parser.add_argument('--tau_temp', type=float, default=0.5, help='temperature parameter for temporal contrastive loss in PCLE module')
+parser.add_argument('--pcle_soft_temporal', type=bool, default=True, help='whether to use soft temporal for PCLE module; True 1 False 0')
+parser.add_argument('--tau_inst', type=float, default=0.5, help='temperature parameter for instance contrastive loss in PCLE module')
+parser.add_argument('--cl_weight', type=float, default=0.01, help='weight for contrastive learning loss')
+
 args = parser.parse_args()
 
 # random seed

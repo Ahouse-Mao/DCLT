@@ -19,10 +19,10 @@ seq_len=96
 default_batch_size=16
 
 # 参数集合（按需修改）
-epochs_list=(200)
+epochs_list=(100)
 tau_temp=(0.5)
-patch_lens=(16 32)
-patch_strides=(2 1 4)
+patch_lens=(16)
+patch_strides=(2)
 max_train_lengths=(336 600 1000)
 repr_dims_list=(256 192)
 pred_lens=(96 336)
@@ -79,7 +79,7 @@ for dataset in weather; do
 
                             echo "=== Pretrain: dataset=${dataset} epoch=${epoch} patch_len=${patch_len} patch_stride=${patch_stride} max_train_len=${max_train_len} repr_dims=${repr_dims} ==="
                             # 避免同分钟内冲突
-                            TS=$(date +%d_%H)
+                            TS=$(date +%y_%d_%H_%M)
                             # 定义 pretrain_log（必须在调用前定义）
                             # pretrain_log="./logs/pretrain/${model_name}_${dataset}_ep${epoch}_pl${patch_len}_ps${patch_stride}_mtl${max_train_len}_rd${repr_dims}.log"
 
@@ -100,7 +100,7 @@ for dataset in weather; do
                             #     # 跳过本次配置的后续预测，继续下一个 repr_dims（或下一个循环）
                             #     continue
                             # fi
-
+                            
                             # 预训练成功后，针对若干 pred_len 运行长预测评估（单个日志文件命名避免覆盖）
                             for pred_len in "${pred_lens[@]}"; do
                                 model_id="${model_id_name}_${seq_len}_${pred_len}"
@@ -110,6 +110,7 @@ for dataset in weather; do
                                 # run_and_continue_atomic "${logfile}" 
                                 mkdir -p "$(dirname "${logfile}")"
                                 python -u ./PatchTST_supervised/run_longExp_v4.py \
+                                    --pretrain_folder "${TS}_${epoch}_${patch_len}_${patch_stride}_${max_train_len}_${repr_dims}" \
                                     --random_seed "${random_seed}" \
                                     --is_training 1 \
                                     --root_path "${root_path_name}" \

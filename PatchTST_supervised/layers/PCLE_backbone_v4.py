@@ -12,10 +12,10 @@ import numpy as np
 from layers.PatchTST_layers import *
 from layers.RevIN import RevIN
 
-from layers.Pretrain_Load_v4 import load_pretrained_model
+from layers.PCLE_layers import Patch_soft_CL
 
 # Cell
-class PatchTST_backbone(nn.Module):
+class PCLE(nn.Module):
     def __init__(self, c_in:int, context_window:int, target_window:int, patch_len:int, stride:int, max_seq_len:Optional[int]=1024, 
                  n_layers:int=3, d_model=128, n_heads=16, d_k:Optional[int]=None, d_v:Optional[int]=None,
                  d_ff:int=256, norm:str='BatchNorm', attn_dropout:float=0., dropout:float=0., act:str="gelu", key_padding_mask:bool='auto',
@@ -25,6 +25,12 @@ class PatchTST_backbone(nn.Module):
                  verbose:bool=False, configs=None, cross_attn_heads:int=4, cross_attn_dropout:float=0., **kwargs):
         
         super().__init__()
+
+        # PCLE
+        self.use_PCLE = configs.use_PCLE
+        self.pcle_outdims = configs.pcle_outdims
+
+        self.d_model = d_model
         
         # RevIn
         self.revin = revin
@@ -40,37 +46,12 @@ class PatchTST_backbone(nn.Module):
             patch_num += 1
 
 
-
-        # 替代patch模块的预训练模块
-        self.use_pretrained_cl = configs.use_pretrained_cl  # 是否使用预训练的cl模型
-        self.enable_cross_attn = configs.enable_cross_attn  # 是否启用cross attention
-        if self.use_pretrained_cl:
-            self.embedding = load_pretrained_model(configs)
-            for param in self.embedding.parameters():
-                param.requires_grad = False
-
-            self.projector = nn.Sequential(
-                nn.Linear(configs.pretrain_d_model, 256),
-                nn.ReLU(),
-                nn.Linear(256, d_model)
-            )
-
-        if self.enable_cross_attn:
-            self.cross_attn = nn.MultiheadAttention(
-                embed_dim=d_model,
-                num_heads=cross_attn_heads,
-                dropout=cross_attn_dropout,
-                batch_first=True,
-            )
-            self.cross_attn_dropout = nn.Dropout(cross_attn_dropout)
-            self.cross_attn_norm = nn.LayerNorm(d_model)
-
         # Backbone 
         self.backbone = TSTiEncoder(c_in, patch_num=patch_num, patch_len=patch_len, max_seq_len=max_seq_len,
                                 n_layers=n_layers, d_model=d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff,
                                 attn_dropout=attn_dropout, dropout=dropout, act=act, key_padding_mask=key_padding_mask, padding_var=padding_var,
                                 attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
-                                pe=pe, learn_pe=learn_pe, verbose=verbose, **kwargs)
+                                pe=pe, learn_pe=learn_pe, verbose=verbose, configs=configs, **kwargs)
 
         # Head
         self.head_nf = d_model * patch_num
@@ -84,7 +65,20 @@ class PatchTST_backbone(nn.Module):
         elif head_type == 'flatten': 
             self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window, head_dropout=head_dropout)
         
-    
+        if self.use_PCLE:
+            self.PCLE_module =  Patch_soft_CL(input_dims=patch_len, output_dims=configs.pcle_outdims, hidden_dims=configs.pcle_hidden_dims,
+                                      depth=configs.pcle_depth, temporal_unit=configs.pcle_temporal_unit,
+                                      soft_instance=configs.pcle_soft_instance, soft_temporal=configs.pcle_soft_temporal,
+                                      feature_extract_net=configs.pcle_feature_extract_net
+                                      )
+            if self.pcle_outdims != self.d_model:
+                self.proj_layer = nn.Sequential(
+                    nn.Linear(configs.pcle_outdims, 256),
+                    nn.ReLU(),
+                    nn.Linear(256, self.d_model)
+                )
+        
+
     def forward(self, z):                                                                   # z: [bs x nvars x seq_len]
         # norm
         if self.revin: 
@@ -98,24 +92,12 @@ class PatchTST_backbone(nn.Module):
         z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride)                   # z: [bs x nvars x patch_num x patch_len]
         z = z.permute(0,1,3,2)                                                              # z: [bs x nvars x patch_len x patch_num]
         B, C , P, N = z.shape
-        z = z.contiguous().view(B*C, N, P)                                                    # z: [bs*nvars x patch_len x patch_num]
-
-        if self.use_pretrained_cl:
-            z = self.embedding(z)  # 使用预训练模型进行特征提取
-
-            z = self.projector(z)  # 投影到目标维度
-
-            D = z.shape[-1]
-            z = z.view(B, C, N, D)  # z: [bs x nvars x d_model x patch_num]
-            if self.enable_cross_attn:
-                if z.dim() != 4:
-                    raise ValueError(f"Expected embedding output with 4 dims, got shape {z.shape}")
-                bsz, nvars, patch_num, d_model = z.shape
-                cross_in = z.permute(0, 2, 1, 3).contiguous().view(bsz * patch_num, nvars, d_model)
-                attn_out, _ = self.cross_attn(cross_in, cross_in, cross_in)
-                cross_in = self.cross_attn_norm(cross_in + self.cross_attn_dropout(attn_out))
-                z = cross_in.view(bsz, patch_num, nvars, d_model).permute(0, 2, 1, 3).contiguous()
         
+        # Patch Contrast Learning Embedding
+        if self.use_PCLE:
+            z, cl_loss = self.PCLE_module(z)                                                      # x: [bs x nvars x N x output_dims]
+            if self.pcle_outdims != self.d_model:
+                z = self.proj_layer(z)                                                   # x: [bs x nvars x N x d_model]
 
         # model
         z = self.backbone(z)                                                                # z: [bs x nvars x d_model x patch_num]
@@ -126,7 +108,10 @@ class PatchTST_backbone(nn.Module):
             z = z.permute(0,2,1)
             z = self.revin_layer(z, 'denorm')
             z = z.permute(0,2,1)
-        return z
+        if self.use_PCLE:
+            return z, cl_loss
+        else:
+            return z
     
     def create_pretrain_head(self, head_nf, vars, dropout):
         return nn.Sequential(nn.Dropout(dropout),
@@ -168,27 +153,24 @@ class Flatten_Head(nn.Module):
             x = self.linear(x)
             x = self.dropout(x)
         return x
-        
-        
-    
     
 class TSTiEncoder(nn.Module):  #i means channel-independent
     def __init__(self, c_in, patch_num, patch_len, max_seq_len=1024,
                  n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None,
                  d_ff=256, norm='BatchNorm', attn_dropout=0., dropout=0., act="gelu", store_attn=False,
                  key_padding_mask='auto', padding_var=None, attn_mask=None, res_attention=True, pre_norm=False,
-                 pe='zeros', learn_pe=True, verbose=False, **kwargs):
+                 pe='zeros', learn_pe=True, verbose=False, configs=None,**kwargs):
         
         
         super().__init__()
         
         self.patch_num = patch_num
-        # self.patch_len = patch_len
-        
-        # 去掉原始模型中的Linear映射
-        # Input encoding
+        self.patch_len = patch_len
         q_len = patch_num
-        # self.W_P = nn.Linear(patch_len, d_model)        # Eq 1: projection of feature vectors onto a d-dim vector space
+        self.use_PCLE = configs.use_PCLE
+        # Input encoding
+        if not self.use_PCLE:
+            self.W_P = nn.Linear(patch_len, d_model)        # Eq 1: projection of feature vectors onto a d-dim vector space
         self.seq_len = q_len
 
         # Positional encoding
@@ -205,9 +187,9 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
     def forward(self, x) -> Tensor:                                              # x: [bs x nvars x patch_num x d_model]
         
         n_vars = x.shape[1]
-        # Input encoding
-        # x = x.permute(0,1,3,2)                                                   # x: [bs x nvars x patch_num x patch_len]
-        # x = self.W_P(x)                                                          # x: [bs x nvars x patch_num x d_model]
+        if not self.use_PCLE:
+            x = x.permute(0,1,3,2)                                                   # x: [bs x nvars x patch_num x patch_len]
+            x = self.W_P(x)                                                          # x: [bs x nvars x patch_num x d_model]
 
         u = torch.reshape(x, (x.shape[0]*x.shape[1],x.shape[2],x.shape[3]))      # u: [bs * nvars x patch_num x d_model]
         u = self.dropout(u + self.W_pos)                                         # u: [bs * nvars x patch_num x d_model]
@@ -217,10 +199,9 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
         z = torch.reshape(z, (-1,n_vars,z.shape[-2],z.shape[-1]))                # z: [bs x nvars x patch_num x d_model]
         z = z.permute(0,1,3,2)                                                   # z: [bs x nvars x d_model x patch_num]
         
-        return z    
-            
-            
-    
+        return z
+
+
 # Cell
 class TSTEncoder(nn.Module):
     def __init__(self, q_len, d_model, n_heads, d_k=None, d_v=None, d_ff=None, 

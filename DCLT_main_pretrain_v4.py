@@ -131,7 +131,7 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', type=int, default=0, help='The gpu no. used for training and inference (defaults to 0)')
     parser.add_argument('--batch_size', type=int, default=16, help='The batch size (defaults to 8)')
     parser.add_argument('--lr', type=float, default=0.001, help='The learning rate (defaults to 0.001)')
-    parser.add_argument('--repr-dims', type=int, default=256, help='The representation dimension (defaults to 320)')
+    parser.add_argument('--repr-dims', type=int, default=512, help='The representation dimension (defaults to 320)')
     parser.add_argument('--max-train-length', type=int, default=336, help='For sequence with a length greater than <max_train_length>, it would be cropped into some sequences, each of which has a length less than <max_train_length> (defaults to 3000)')
     parser.add_argument('--iters', type=int, default=None, help='The number of iterations')
     parser.add_argument('--epochs', type=int, default=300, help='The number of epochs')
@@ -154,6 +154,7 @@ if __name__ == '__main__':
     parser.add_argument('--depth', type=int, default=8, help='The depth of the model when using patch-level contrastive learning')
     parser.add_argument('--revin', type=int, default=1, help='RevIN; True 1 False 0')
     parser.add_argument('--TS', type=str, default=None, help='Timestamp')
+    parser.add_argument('--hidden_dims', type=int, default=128, help='The hidden dimension size for the encoder model')
     args = parser.parse_args()
 
     args = init_n_vars(args) # 根据数据集名称初始化 n_vars 参数
@@ -184,7 +185,7 @@ if __name__ == '__main__':
     # =============== Checkpoints 目录（根据用户要求） ===============
     # ./checkpoints/{dataset}/{patch_len}-{repr-dims}v4{时间戳}/
     if args.TS is None:
-        timestamp = datetime.datetime.now().strftime('%d_%H')
+        timestamp = datetime.datetime.now().strftime('%d_%H_%M')
     else:
         timestamp = args.TS
     ckpt_sub = f"{timestamp}_{args.epochs}_{args.patch_len}_{args.patch_stride}_{args.max_train_length}_{args.repr_dims}"
@@ -350,7 +351,7 @@ if __name__ == '__main__':
             args.patch_cl_ver,
             input_dims_for_yaml,
             args.repr_dims,
-            64,
+            args.hidden_dims,
             args.depth,
             device_str,
             args.lr,

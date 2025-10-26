@@ -48,7 +48,7 @@ class TS2Vec:
         input_dims,                    # 输入特征维度
         n_vars=None,
         output_dims=320,               # 输出表示向量维度
-        hidden_dims=64,                # 隐藏层维度
+        hidden_dims=128,                # 隐藏层维度
         depth=10,                      # 扩张卷积网络深度
         device='cuda',                 # 计算设备
         lr=0.001,                      # 学习率
@@ -343,7 +343,7 @@ class TS2Vec:
                 
                 optimizer.zero_grad()
                 # 启用异常检测，便于定位产生 NaN/Inf 的具体算子（调试期可开启，发布时可注释）
-                torch.autograd.set_detect_anomaly(True)
+                # torch.autograd.set_detect_anomaly(True)
 
                 # ================ 编码两个子序列 ================
                 # 第一个子序列：较长，包含重叠区域的后半部分

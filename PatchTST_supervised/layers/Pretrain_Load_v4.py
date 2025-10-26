@@ -63,5 +63,5 @@ def check_prams(configs, cfg):
     if configs.stride != cfg.patch_stride:
         Warning(f"推理Patch_stride与训练Patch_stride不匹配: {configs.stride} vs {cfg.patch_stride}, 但仍可运行")
     if configs.d_model != cfg.output_dims:
-        raise ValueError(f"embedding后的d_model维度不匹配: {configs.d_model} vs {cfg.output_dims}")
+        Warning(f"embedding后的d_model维度不匹配: {configs.d_model} vs {cfg.output_dims}")
     

@@ -22,8 +22,8 @@ default_batch_size=16
 epochs_list=(20 20 200 200)
 tau_temp=(0.5)
 patch_lens=(16)
-patch_strides=(2)
-max_train_lengths=(336)
+patch_strides=(8)
+max_train_lengths=(96 720)
 repr_dims_list=(256)
 pred_lens=(96 336)
 
@@ -79,7 +79,7 @@ for dataset in ETTh1; do
 
                             echo "=== Pretrain: dataset=${dataset} epoch=${epoch} patch_len=${patch_len} patch_stride=${patch_stride} max_train_len=${max_train_len} repr_dims=${repr_dims} ==="
                             # 避免同分钟内冲突
-                            TS=$(date +%d_%H)
+                            TS=$(date +%d_%H_%M)
                             # 定义 pretrain_log（必须在调用前定义）
                             # pretrain_log="./logs/pretrain/${model_name}_${dataset}_ep${epoch}_pl${patch_len}_ps${patch_stride}_mtl${max_train_len}_rd${repr_dims}.log"
 
@@ -180,7 +180,7 @@ for dataset in ETTh1; do
                             #         echo -e "\n=== FAILED with exit code ${rc_pretrain_eval} ===" >>"${logfile}"
                             #     fi
                                 # 不需要在这里中断脚本 — run_and_continue 会记录失败并返回 non-zero，但循环会继续
-                            done
+                            # done
 
                         done
                     done

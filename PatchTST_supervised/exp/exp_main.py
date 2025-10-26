@@ -1,6 +1,6 @@
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
-from models import Informer, Autoformer, Transformer, DLinear, Linear, NLinear, PatchTST, PatchTST_pretrained_cl, PatchTST_pretrained_v3, PatchTST_pretrained_v4
+from models import Informer, Autoformer, Transformer, DLinear, Linear, NLinear, PatchTST, PatchTST_pretrained_cl, PatchTST_pretrained_v3, PatchTST_pretrained_v4, PCLE_v4
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop
 from utils.metrics import metric
 
@@ -34,7 +34,8 @@ class Exp_Main(Exp_Basic):
             'PatchTST': PatchTST,
             'PatchTST_pretrained_cl': PatchTST_pretrained_cl,
             'PatchTST_pretrained_v3': PatchTST_pretrained_v3,
-            'PatchTST_pretrained_v4': PatchTST_pretrained_v4
+            'PatchTST_pretrained_v4': PatchTST_pretrained_v4,
+            'PCLE_v4': PCLE_v4,
         }
         model = model_dict[self.args.model].Model(self.args).float()
 
@@ -56,6 +57,7 @@ class Exp_Main(Exp_Basic):
 
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
+        total_cl_loss = []
         self.model.eval()
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):
@@ -81,6 +83,10 @@ class Exp_Main(Exp_Basic):
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
                         outputs = self.model(batch_x)
+                    elif self.args.model == 'PCLE_v4':
+                        outputs, cl_loss = self.model(batch_x)
+                        cl_loss = cl_loss.to('cpu')
+                        total_cl_loss.append(cl_loss.item())
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
@@ -95,10 +101,16 @@ class Exp_Main(Exp_Basic):
 
                 loss = criterion(pred, true)
 
-                total_loss.append(loss)
-        total_loss = np.average(total_loss)
-        self.model.train()
-        return total_loss
+                total_loss.append(loss.item())
+        if self.args.model == 'PCLE_v4':
+            total_loss = np.average(total_loss)
+            total_cl_loss = np.average(total_cl_loss)
+            self.model.train()
+            return total_loss, total_cl_loss
+        else:
+            total_loss = np.average(total_loss)
+            self.model.train()
+            return total_loss
 
     def train(self, setting):
         train_data, train_loader = self._get_data(flag='train')
@@ -129,6 +141,7 @@ class Exp_Main(Exp_Basic):
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
+            train_cl_loss = []
 
             self.model.train()
             epoch_time = time.time()
@@ -164,6 +177,8 @@ class Exp_Main(Exp_Basic):
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
+                    elif self.args.model == 'PCLE_v4':
+                        outputs, cl_loss = self.model(batch_x)
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
@@ -176,14 +191,27 @@ class Exp_Main(Exp_Basic):
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
                     loss = criterion(outputs, batch_y)
                     train_loss.append(loss.item())
+                    if self.args.model == 'PCLE_v4':
+                        mse_loss = loss.item()
+                        cl_loss = self.args.cl_weight * cl_loss
+                        train_cl_loss.append(cl_loss.item())
+                        loss += cl_loss
 
                 if (i + 1) % 100 == 0:
-                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
-                    speed = (time.time() - time_now) / iter_count
-                    left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
-                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
-                    iter_count = 0
-                    time_now = time.time()
+                    if self.args.model == 'PCLE_v4':
+                        print("\titers: {0}, epoch: {1} | mse_loss: {2:.7f} cl_loss: {3:.7f}".format(i + 1, epoch + 1, mse_loss, cl_loss.item()))
+                        speed = (time.time() - time_now) / iter_count
+                        left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
+                        print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
+                        iter_count = 0
+                        time_now = time.time()
+                    else:
+                        print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
+                        speed = (time.time() - time_now) / iter_count
+                        left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
+                        print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
+                        iter_count = 0
+                        time_now = time.time()
 
                 if self.args.use_amp:
                     scaler.scale(loss).backward()
@@ -199,11 +227,17 @@ class Exp_Main(Exp_Basic):
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
-            vali_loss = self.vali(vali_data, vali_loader, criterion)
-            test_loss = self.vali(test_data, test_loader, criterion)
-
-            print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
-                epoch + 1, train_steps, train_loss, vali_loss, test_loss))
+            if self.args.model == 'PCLE_v4':
+                train_cl_loss = np.average(train_cl_loss)
+                vali_loss, val_cl_loss = self.vali(vali_data, vali_loader, criterion)
+                test_loss, test_cl_loss = self.vali(test_data, test_loader, criterion)
+                print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Train cl_loss: {3:.7f} Vali Loss: {4:.7f} Vali cl_loss: {5:.7f} Test Loss: {6:.7f} Test cl_loss: {7:.7f}".format(
+                    epoch + 1, train_steps, train_loss, train_cl_loss, vali_loss, val_cl_loss, test_loss, test_cl_loss))
+            else:
+                vali_loss = self.vali(vali_data, vali_loader, criterion)
+                test_loss = self.vali(test_data, test_loader, criterion)
+                print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
+                    epoch + 1, train_steps, train_loss, vali_loss, test_loss))
             early_stopping(vali_loss, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
@@ -258,6 +292,8 @@ class Exp_Main(Exp_Basic):
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
+                    elif self.args.model == 'PCLE_v4':
+                        outputs, _ = self.model(batch_x)
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
