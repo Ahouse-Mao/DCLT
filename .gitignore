@@ -19,3 +19,6 @@ lightning_logs/
 results_forecast_csv/
 
 fubingqixiang.zip
+
+/exp_results
+/PatchTST_supervised/exp_results

@@ -127,6 +127,7 @@ parser.add_argument('--pcle_feature_extract_net', type=str, default='dilated_con
 parser.add_argument('--pcle_temporal_unit', type=int, default=0, help='temporal unit for PCLE module, patch or timepoint')
 parser.add_argument('--pcle_outdims', type=int, default=128, help='output dims of PCLE module')
 parser.add_argument('--pcle_hidden_dims', type=int, default=64, help='hidden dims of PCLE module')
+parser.add_argument('--pcle_proj_hidden_dims', type=int, default=64, help='projection head hidden dims of PCLE module')
 
 parser.add_argument('--pcle_depth', type=int, default=8, help='depth of PCLE module')
 parser.add_argument('--lambda_', type=float, default=0.5, help='weight of instance contrastive loss and temporal contrastive loss')

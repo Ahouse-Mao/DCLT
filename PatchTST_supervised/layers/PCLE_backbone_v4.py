@@ -30,6 +30,7 @@ class PCLE(nn.Module):
         self.use_PCLE = configs.use_PCLE
         self.pcle_outdims = configs.pcle_outdims
         self.enable_cross_attn = configs.enable_cross_attn
+        self.pcle_proj_hidden_dims = configs.pcle_proj_hidden_dims
 
         self.d_model = d_model
         
@@ -74,9 +75,9 @@ class PCLE(nn.Module):
                                       )
             if self.pcle_outdims != self.d_model:
                 self.proj_layer = nn.Sequential(
-                    nn.Linear(configs.pcle_outdims, 256),
+                    nn.Linear(configs.pcle_outdims, self.pcle_proj_hidden_dims),
                     nn.ReLU(),
-                    nn.Linear(256, self.d_model)
+                    nn.Linear(self.pcle_proj_hidden_dims, self.d_model)
                 )
         if self.enable_cross_attn:
             self.cross_attn = nn.MultiheadAttention(
