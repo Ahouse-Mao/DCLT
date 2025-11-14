@@ -108,7 +108,7 @@ parser.add_argument('--test_flop', action='store_true', default=False, help='See
 parser.add_argument('--cl_model_gene', type=int, default=1, help='generation of cl model; 1: DCLT_on_var, 2: DCLT_on_path')
 
 # cross-attention模块
-parser.add_argument('--use_cross_attention', type=bool, default=True, help='whether to use cross-attention; True 1 False 0')
+parser.add_argument('--use_cross_attention', type=bool, default=False, help='whether to use cross-attention; True 1 False 0')
 parser.add_argument('--add_pos', type=str, default='emb_x_backbone', help='whether to add positional encoding in cross-attention, emb_x_backbone: between emb and backbone, backbone_x_head: between backbone and head')
 parser.add_argument('--cross_attention_type', type=str, default='full', help='full or patch')
 

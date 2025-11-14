@@ -1,6 +1,6 @@
-__all__ = ['PatchTST_backbone']
 
 # Cell
+import os
 from typing import Callable, Optional
 import torch
 from torch import nn
@@ -33,6 +33,8 @@ class PCLE(nn.Module):
         self.pcle_proj_hidden_dims = configs.pcle_proj_hidden_dims
 
         self.d_model = d_model
+
+        self.save_data_for_umap = True
         
         # RevIn
         self.revin = revin
@@ -68,10 +70,16 @@ class PCLE(nn.Module):
             self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window, head_dropout=head_dropout)
         
         if self.use_PCLE:
-            self.PCLE_module =  Patch_soft_CL(input_dims=patch_len, output_dims=configs.pcle_outdims, hidden_dims=configs.pcle_hidden_dims,
-                                      depth=configs.pcle_depth, temporal_unit=configs.pcle_temporal_unit,
-                                      soft_instance=configs.pcle_soft_instance, soft_temporal=configs.pcle_soft_temporal,
-                                      feature_extract_net=configs.pcle_feature_extract_net
+            self.PCLE_module =  Patch_soft_CL(input_dims=patch_len,
+                                              output_dims=configs.pcle_outdims,
+                                              hidden_dims=configs.pcle_hidden_dims,
+                                              depth=configs.pcle_depth,
+                                              lambda_= configs.lambda_,
+                                              tau_temp= configs.tau_temp,
+                                              temporal_unit=configs.pcle_temporal_unit,
+                                              soft_instance=configs.pcle_soft_instance,
+                                              soft_temporal=configs.pcle_soft_temporal,
+                                              feature_extract_net=configs.pcle_feature_extract_net,
                                       )
             if self.pcle_outdims != self.d_model:
                 self.proj_layer = nn.Sequential(
@@ -107,6 +115,19 @@ class PCLE(nn.Module):
         # Patch Contrast Learning Embedding
         if self.use_PCLE:
             z, cl_loss = self.PCLE_module(z)                                                      # x: [bs x nvars x N x output_dims]
+            
+            # # 这里输出一下UMAP图片
+            # if self.save_data_for_umap:
+            #     output_dir = "./data_outputs"
+            #     os.makedirs(output_dir, exist_ok=True)
+            #     z_cpu = z.detach().cpu()
+            #     torch.save({
+            #         'embeddings': z_cpu,
+            #         'shape': list(z_cpu.shape)
+            #     }, output_dir + f"/pcle_embeddings.pt")
+            #     self.save_data_for_umap = False
+            #     print("保存了用于UMAP可视化的数据")
+
             if self.pcle_outdims != self.d_model:
                 z = self.proj_layer(z)  
             if self.enable_cross_attn:
@@ -119,6 +140,18 @@ class PCLE(nn.Module):
                 cross_in = self.cross_attn_norm(cross_in + self.cross_attn_dropout(attn_out))
                 z = cross_in.view(bsz, nvars, patch_num, d_model).contiguous()
                                                              # x: [bs x nvars x N x d_model]
+            
+            # 这里输出一下UMAP图片
+            if self.save_data_for_umap:
+                output_dir = "./data_outputs"
+                os.makedirs(output_dir, exist_ok=True)
+                z_cpu = z.detach().cpu()
+                torch.save({
+                    'embeddings': z_cpu,
+                    'shape': list(z_cpu.shape)
+                }, output_dir + f"/pcle_embeddings.pt")
+                self.save_data_for_umap = False
+                print("保存了用于UMAP可视化的数据")
 
         # model
         z = self.backbone(z)                                                                # z: [bs x nvars x d_model x patch_num]

@@ -49,7 +49,7 @@ def get_filenames(directory, keyword):
     return found_files
 
 if __name__ == "__main__":
-    keyword = "25_29_13_28_PCLE_v4_ETTh1"
+    keyword = "25_05_16_28_PCLE_v4_ETTh1"
     directory = "./PatchTST_supervised/logs/LongForecasting/"
     attention_args = ['pred_len', 'fc_dropout', 'head_dropout', 'dropout', 'd_model', 'd_ff', 'pcle_out_dims', 'pcle_hidden_dims', 'pcle_proj_hidden_dims', 'random_seed', 'mse', 'mae']
 

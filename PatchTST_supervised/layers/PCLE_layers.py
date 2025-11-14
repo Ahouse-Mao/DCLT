@@ -16,7 +16,7 @@ class Patch_soft_CL(nn.Module):
         temporal_unit=0,               # 时间对比学习的最小单元
         soft_instance=False,           # 是否启用实例级软对比学习
         soft_temporal=True,           # 是否启用时间级软对比学习
-        feature_extract_net='dilated_conv'    # 特征提取网络类型，默认为TCN
+        feature_extract_net='dilated_conv'    # 特征提取网络类型，默认为dilated_conv
     ):
         super().__init__()
         self.input_dims = input_dims

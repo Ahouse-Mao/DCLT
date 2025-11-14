@@ -153,6 +153,7 @@ class Exp_Main(Exp_Basic):
 
             self.model.train()
             epoch_time = time.time()
+            self.model.model.save_data_for_umap = True   # 每个epoch保存一次数据用于UMAP可视化
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
                 iter_count += 1
                 model_optim.zero_grad()
